@@ -1,20 +1,82 @@
-import type { User } from "../types";
+import { z } from "zod";
 import { applyFilters, computeStats, EMPTY_FILTERS, type Filters } from "../hooks/useDashboard";
 import type { DashboardCtxValue } from "../components/dashboard-ctx";
 
-export interface ToolFilters {
-  role?: "admin" | "moderator" | "user";
-  gender?: "male" | "female";
-  department?: string;
-  title?: string;
-  country?: string;
-  state?: string;
-  ageMin?: number;
-  ageMax?: number;
-  q?: string;
-}
+// ── schemas ──────────────────────────────────────────────────────────────────
 
-type GroupKey = "role" | "gender" | "department" | "country" | "title" | "state";
+const FiltersSchema = z
+  .object({
+    role: z.enum(["admin", "moderator", "user"]).optional(),
+    gender: z.enum(["male", "female"]).optional(),
+    department: z.string().optional(),
+    title: z.string().optional(),
+    country: z.string().optional(),
+    state: z.string().optional(),
+    ageMin: z.number().optional(),
+    ageMax: z.number().optional(),
+    q: z.string().optional(),
+  })
+  .strict()
+  .optional();
+
+const GroupKeySchema = z.enum(["role", "gender", "department", "country", "title", "state"]);
+
+const StatsInputSchema = z
+  .object({
+    filters: FiltersSchema,
+    groupBy: GroupKeySchema.optional(),
+    topN: z.number().int().positive().max(50).default(10),
+  })
+  .strict();
+
+const QueryInputSchema = z
+  .object({
+    filters: FiltersSchema,
+    fields: z.array(z.string()).optional(),
+    limit: z.number().int().positive().max(20).default(10),
+    sortBy: z.enum(["firstName", "lastName", "age"]).optional(),
+  })
+  .strict();
+
+const ApplyInputSchema = z
+  .object({
+    role: z.enum(["admin", "moderator", "user", ""]).optional(),
+    gender: z.enum(["male", "female", ""]).optional(),
+    department: z.string().optional(),
+    title: z.string().optional(),
+    country: z.string().optional(),
+    state: z.string().optional(),
+    q: z.string().optional(),
+    ageMin: z.number().optional(),
+    ageMax: z.number().optional(),
+    clearOthers: z.boolean().default(false),
+  })
+  .strict();
+
+const ClearInputSchema = z.object({}).strict().optional();
+const OpenUserSchema = z.object({ id: z.number().int().positive() }).strict();
+
+export type ToolFilters = z.infer<typeof FiltersSchema>;
+
+type GroupKey = z.infer<typeof GroupKeySchema>;
+
+// ── anthropic tool schemas (sent to model) ──────────────────────────────────
+
+const filterPropertiesSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    role: { type: "string", enum: ["admin", "moderator", "user"] },
+    gender: { type: "string", enum: ["male", "female"] },
+    department: { type: "string" },
+    title: { type: "string" },
+    country: { type: "string" },
+    state: { type: "string" },
+    ageMin: { type: "number" },
+    ageMax: { type: "number" },
+    q: { type: "string", description: "Substring search across first/last name, email, username" },
+  },
+};
 
 export const ANTHROPIC_TOOLS = [
   {
@@ -24,20 +86,7 @@ export const ANTHROPIC_TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        filters: {
-          type: "object",
-          properties: {
-            role: { type: "string", enum: ["admin", "moderator", "user"] },
-            gender: { type: "string", enum: ["male", "female"] },
-            department: { type: "string" },
-            title: { type: "string" },
-            country: { type: "string" },
-            state: { type: "string" },
-            ageMin: { type: "number" },
-            ageMax: { type: "number" },
-            q: { type: "string", description: "Substring search across first/last name, email, username" },
-          },
-        },
+        filters: filterPropertiesSchema,
         groupBy: {
           type: "string",
           enum: ["role", "gender", "department", "country", "title", "state"],
@@ -54,20 +103,7 @@ export const ANTHROPIC_TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        filters: {
-          type: "object",
-          properties: {
-            role: { type: "string", enum: ["admin", "moderator", "user"] },
-            gender: { type: "string", enum: ["male", "female"] },
-            department: { type: "string" },
-            title: { type: "string" },
-            country: { type: "string" },
-            state: { type: "string" },
-            ageMin: { type: "number" },
-            ageMax: { type: "number" },
-            q: { type: "string" },
-          },
-        },
+        filters: filterPropertiesSchema,
         fields: {
           type: "array",
           items: { type: "string" },
@@ -81,7 +117,7 @@ export const ANTHROPIC_TOOLS = [
   {
     name: "apply_filters",
     description:
-      "Set filters on the dashboard UI (chips in the top bar update, list re-renders). Use when the user asks to 'show only X'. Empty/missing fields are left untouched unless clearOthers is true. Returns matched_count.",
+      "Set filters on the dashboard UI (chips in the top bar update, list re-renders). Use when the user asks to 'show only X'. Empty/missing fields are left untouched unless clearOthers is true. Returns matched_count plus a diff describing what changed (used by the UI to show the user what was set).",
     input_schema: {
       type: "object",
       properties: {
@@ -104,7 +140,7 @@ export const ANTHROPIC_TOOLS = [
   },
   {
     name: "clear_filters",
-    description: "Reset all dashboard filters.",
+    description: "Reset all dashboard filters. Returns the previous state so the UI can offer Undo.",
     input_schema: { type: "object", properties: {} },
   },
   {
@@ -118,7 +154,26 @@ export const ANTHROPIC_TOOLS = [
   },
 ];
 
-function toInternalFilters(f: ToolFilters | undefined): { filters: Filters; ageFilter: [number, number] | null } {
+// ── rate limiting (sliding window, per browser tab) ─────────────────────────
+
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX_CALLS = 30;
+const callTimestamps: number[] = [];
+
+function checkRateLimit(): { ok: true } | { ok: false; retryAfterSec: number } {
+  const now = Date.now();
+  const cutoff = now - RATE_WINDOW_MS;
+  while (callTimestamps.length && callTimestamps[0] < cutoff) callTimestamps.shift();
+  if (callTimestamps.length >= RATE_MAX_CALLS) {
+    return { ok: false, retryAfterSec: Math.ceil((callTimestamps[0] + RATE_WINDOW_MS - now) / 1000) };
+  }
+  callTimestamps.push(now);
+  return { ok: true };
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+function toInternalFilters(f: ToolFilters): { filters: Filters; ageFilter: [number, number] | null } {
   const filters: Filters = {
     ...EMPTY_FILTERS,
     q: f?.q ?? "",
@@ -136,15 +191,15 @@ function toInternalFilters(f: ToolFilters | undefined): { filters: Filters; ageF
   return { filters, ageFilter: age };
 }
 
-function groupValue(u: User, key: GroupKey): string {
+function groupValue(u: { role: string; gender: string; company: { department: string; title: string }; address: { country: string; state: string } }, key: GroupKey): string {
   if (key === "department") return u.company.department;
   if (key === "title") return u.company.title;
   if (key === "country") return u.address.country;
   if (key === "state") return u.address.state;
-  return u[key];
+  return key === "role" ? u.role : u.gender;
 }
 
-function topN(users: User[], key: GroupKey, n: number): Array<{ value: string; count: number }> {
+function topN<T extends Parameters<typeof groupValue>[0]>(users: T[], key: GroupKey, n: number): Array<{ value: string; count: number }> {
   const map = new Map<string, number>();
   for (const u of users) {
     const v = groupValue(u, key);
@@ -156,7 +211,7 @@ function topN(users: User[], key: GroupKey, n: number): Array<{ value: string; c
     .map(([value, count]) => ({ value, count }));
 }
 
-function ageBuckets(users: User[]): Record<string, number> {
+function ageBuckets(users: Array<{ age: number }>): Record<string, number> {
   const buckets = { "18-25": 0, "26-35": 0, "36-45": 0, "46-55": 0, "56+": 0 };
   for (const u of users) {
     if (u.age <= 25) buckets["18-25"]++;
@@ -168,57 +223,7 @@ function ageBuckets(users: User[]): Record<string, number> {
   return buckets;
 }
 
-interface StatsInput {
-  filters?: ToolFilters;
-  groupBy?: GroupKey;
-  topN?: number;
-}
-
-interface QueryInput {
-  filters?: ToolFilters;
-  fields?: string[];
-  limit?: number;
-  sortBy?: "firstName" | "lastName" | "age";
-}
-
-interface ApplyInput extends ToolFilters {
-  clearOthers?: boolean;
-}
-
-type ToolResult = Record<string, unknown> | { error: string };
-
-export async function executeTool(name: string, input: unknown, ctx: DashboardCtxValue): Promise<ToolResult> {
-  try {
-    if (name === "get_users_stats") return statsTool(input as StatsInput, ctx);
-    if (name === "query_users") return queryTool(input as QueryInput, ctx);
-    if (name === "apply_filters") return applyFiltersTool(input as ApplyInput, ctx);
-    if (name === "clear_filters") return clearTool(ctx);
-    if (name === "open_user") return openUserTool(input as { id: number }, ctx);
-    return { error: `Unknown tool: ${name}` };
-  } catch (e) {
-    return { error: e instanceof Error ? e.message : String(e) };
-  }
-}
-
-function statsTool(input: StatsInput, ctx: DashboardCtxValue): ToolResult {
-  const { filters, ageFilter } = toInternalFilters(input?.filters);
-  const subset = applyFilters(ctx.users, filters, ageFilter);
-  const base = computeStats(subset);
-  const ages = subset.map((u) => u.age);
-  const result: Record<string, unknown> = {
-    ...base,
-    minAge: ages.length ? Math.min(...ages) : 0,
-    maxAge: ages.length ? Math.max(...ages) : 0,
-    ageBuckets: ageBuckets(subset),
-  };
-  if (input?.groupBy) {
-    result.groupBy = input.groupBy;
-    result.top = topN(subset, input.groupBy, input.topN ?? 10);
-  }
-  return result;
-}
-
-function pickFields(u: User, fields: string[]): Record<string, unknown> {
+function pickFields<U extends { id: number; firstName: string; lastName: string; age: number; gender: string; role: string; email: string; username: string; phone: string; university: string; bloodGroup: string; company: { name: string; department: string; title: string }; address: { country: string; state: string; city: string } }>(u: U, fields: string[]): Record<string, unknown> {
   const flat: Record<string, unknown> = {
     id: u.id,
     firstName: u.firstName,
@@ -245,15 +250,80 @@ function pickFields(u: User, fields: string[]): Record<string, unknown> {
   return out;
 }
 
-function queryTool(input: QueryInput, ctx: DashboardCtxValue): ToolResult {
-  const { filters, ageFilter } = toInternalFilters(input?.filters);
-  let subset = applyFilters(ctx.users, filters, ageFilter);
-  if (input?.sortBy === "age") subset = [...subset].sort((a, b) => a.age - b.age);
-  else if (input?.sortBy === "lastName") subset = [...subset].sort((a, b) => a.lastName.localeCompare(b.lastName));
-  else if (input?.sortBy === "firstName") subset = [...subset].sort((a, b) => a.firstName.localeCompare(b.firstName));
+// ── executor ────────────────────────────────────────────────────────────────
 
-  const limit = Math.min(input?.limit ?? 10, 20);
-  const fields = input?.fields?.length
+type ToolResult = Record<string, unknown> | { error: string; retry_after_sec?: number };
+
+export async function executeTool(name: string, rawInput: unknown, ctx: DashboardCtxValue): Promise<ToolResult> {
+  const limit = checkRateLimit();
+  if (!limit.ok) {
+    return { error: `Tool rate limit exceeded (${RATE_MAX_CALLS}/min). Retry in ${limit.retryAfterSec}s.`, retry_after_sec: limit.retryAfterSec };
+  }
+
+  try {
+    switch (name) {
+      case "get_users_stats": {
+        const input = StatsInputSchema.parse(rawInput ?? {});
+        return statsTool(input, ctx);
+      }
+      case "query_users": {
+        const input = QueryInputSchema.parse(rawInput ?? {});
+        return queryTool(input, ctx);
+      }
+      case "apply_filters": {
+        const input = ApplyInputSchema.parse(rawInput ?? {});
+        return applyFiltersTool(input, ctx);
+      }
+      case "clear_filters": {
+        ClearInputSchema.parse(rawInput);
+        return clearTool(ctx);
+      }
+      case "open_user": {
+        const input = OpenUserSchema.parse(rawInput);
+        return openUserTool(input, ctx);
+      }
+      default:
+        return { error: `Unknown tool: ${name}` };
+    }
+  } catch (e) {
+    if (e instanceof z.ZodError) {
+      return { error: `Invalid tool input: ${e.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}` };
+    }
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+type StatsInput = z.infer<typeof StatsInputSchema>;
+type QueryInput = z.infer<typeof QueryInputSchema>;
+type ApplyInput = z.infer<typeof ApplyInputSchema>;
+
+function statsTool(input: StatsInput, ctx: DashboardCtxValue): ToolResult {
+  const { filters, ageFilter } = toInternalFilters(input.filters);
+  const subset = applyFilters(ctx.users, filters, ageFilter);
+  const base = computeStats(subset);
+  const ages = subset.map((u) => u.age);
+  const result: Record<string, unknown> = {
+    ...base,
+    minAge: ages.length ? Math.min(...ages) : 0,
+    maxAge: ages.length ? Math.max(...ages) : 0,
+    ageBuckets: ageBuckets(subset),
+  };
+  if (input.groupBy) {
+    result.groupBy = input.groupBy;
+    result.top = topN(subset, input.groupBy, input.topN);
+  }
+  return result;
+}
+
+function queryTool(input: QueryInput, ctx: DashboardCtxValue): ToolResult {
+  const { filters, ageFilter } = toInternalFilters(input.filters);
+  let subset = applyFilters(ctx.users, filters, ageFilter);
+  if (input.sortBy === "age") subset = [...subset].sort((a, b) => a.age - b.age);
+  else if (input.sortBy === "lastName") subset = [...subset].sort((a, b) => a.lastName.localeCompare(b.lastName));
+  else if (input.sortBy === "firstName") subset = [...subset].sort((a, b) => a.firstName.localeCompare(b.firstName));
+
+  const limit = input.limit;
+  const fields = input.fields?.length
     ? input.fields
     : ["id", "firstName", "lastName", "age", "gender", "role", "department", "title", "country"];
 
@@ -265,43 +335,55 @@ function queryTool(input: QueryInput, ctx: DashboardCtxValue): ToolResult {
   };
 }
 
+function snapshotFilters(ctx: DashboardCtxValue) {
+  const s = ctx.getCurrentFilters();
+  return {
+    q: s.q, role: s.role, department: s.department, title: s.title,
+    gender: s.gender, country: s.country, state: s.state,
+    ageMin: s.ageFilter ? s.ageFilter[0] : null,
+    ageMax: s.ageFilter ? s.ageFilter[1] : null,
+  };
+}
+
 function applyFiltersTool(input: ApplyInput, ctx: DashboardCtxValue): ToolResult {
-  if (input?.clearOthers) ctx.clear();
+  const before = snapshotFilters(ctx);
+  if (input.clearOthers) ctx.clear();
 
   const keys: Array<keyof Filters> = ["q", "role", "department", "title", "gender", "country", "state"];
   for (const k of keys) {
-    const v = input?.[k as keyof ApplyInput];
+    const v = input[k as keyof ApplyInput];
     if (typeof v === "string") ctx.setFilter(k, v);
   }
-  if (typeof input?.ageMin === "number" || typeof input?.ageMax === "number") {
-    ctx.onAgeChange([input?.ageMin ?? 0, input?.ageMax ?? 200]);
+  if (typeof input.ageMin === "number" || typeof input.ageMax === "number") {
+    ctx.onAgeChange([input.ageMin ?? 0, input.ageMax ?? 200]);
   }
 
-  const snapshot = ctx.getCurrentFilters();
-  const internal: Filters = {
-    q: typeof input?.q === "string" ? input.q : snapshot.q,
-    role: typeof input?.role === "string" ? input.role : snapshot.role,
-    department: typeof input?.department === "string" ? input.department : snapshot.department,
-    title: typeof input?.title === "string" ? input.title : snapshot.title,
-    gender: typeof input?.gender === "string" ? input.gender : snapshot.gender,
-    country: typeof input?.country === "string" ? input.country : snapshot.country,
-    state: typeof input?.state === "string" ? input.state : snapshot.state,
-  };
-  const age: [number, number] | null =
-    typeof input?.ageMin === "number" || typeof input?.ageMax === "number"
-      ? [input?.ageMin ?? 0, input?.ageMax ?? 200]
-      : snapshot.ageFilter;
+  const after = snapshotFilters(ctx);
 
+  // Compute diff: keys whose value changed
+  const diff: Record<string, { from: string | number | null; to: string | number | null }> = {};
+  (Object.keys(before) as Array<keyof typeof before>).forEach((k) => {
+    if (before[k] !== after[k]) diff[k] = { from: before[k], to: after[k] };
+  });
+
+  const internal: Filters = {
+    q: after.q, role: after.role, department: after.department, title: after.title,
+    gender: after.gender, country: after.country, state: after.state,
+  };
+  const age: [number, number] | null = after.ageMin !== null || after.ageMax !== null
+    ? [after.ageMin ?? 0, after.ageMax ?? 200] : null;
   const matched = applyFilters(ctx.users, internal, age);
-  return { matched_count: matched.length, active_filters: { ...internal, ageFilter: age } };
+
+  return { matched_count: matched.length, previous_filters: before, current_filters: after, diff };
 }
 
 function clearTool(ctx: DashboardCtxValue): ToolResult {
+  const before = snapshotFilters(ctx);
   ctx.clear();
-  return { ok: true, total_users: ctx.users.length };
+  return { ok: true, total_users: ctx.users.length, previous_filters: before };
 }
 
-function openUserTool(input: { id: number }, ctx: DashboardCtxValue): ToolResult {
+function openUserTool(input: z.infer<typeof OpenUserSchema>, ctx: DashboardCtxValue): ToolResult {
   const user = ctx.users.find((u) => u.id === input.id);
   if (!user) return { error: `No user with id ${input.id}` };
   ctx.setSelected(user);
