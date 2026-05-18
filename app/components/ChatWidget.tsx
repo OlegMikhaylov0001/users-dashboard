@@ -4,14 +4,39 @@ import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { DashboardCtx } from "./dashboard-ctx";
 import { ANTHROPIC_TOOLS, executeTool } from "../lib/chatTools";
 import { runChat, type AnthropicContentBlock, type AnthropicMessage } from "../lib/anthropic";
+import { addUsage, costUsd, EMPTY_USAGE, formatCost, formatTokens, totalTokens, type ChatUsage } from "../lib/pricing";
+import type { Filters } from "../hooks/useDashboard";
 
 const STORAGE_KEY = "ud_anthropic_key";
 const MODEL = "claude-sonnet-4-6";
 
+interface FiltersSnapshot {
+  q: string;
+  role: string;
+  department: string;
+  title: string;
+  gender: string;
+  country: string;
+  state: string;
+  ageMin: number | null;
+  ageMax: number | null;
+}
+
+interface ToolCallRecord {
+  name: string;
+  input: unknown;
+  output?: unknown;
+  // For apply_filters / clear_filters — captured at execution time so Undo can revert.
+  previousFilters?: FiltersSnapshot;
+  // For apply_filters — keys → from/to so we can render a diff chip.
+  diff?: Record<string, { from: unknown; to: unknown }>;
+  undone?: boolean;
+}
+
 interface ChatTurn {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   text?: string;
-  toolCalls?: Array<{ name: string; input: unknown }>;
+  toolCalls?: ToolCallRecord[];
 }
 
 interface FilterSnapshotForPrompt {
@@ -58,6 +83,71 @@ const SUGGESTIONS = [
   "Show only female HR users",
 ];
 
+interface SlashCommand {
+  name: string;
+  args?: string;
+  description: string;
+}
+
+const SLASH_COMMANDS: SlashCommand[] = [
+  { name: "help", description: "List available commands" },
+  { name: "clear", description: "Wipe chat history (local, no API call)" },
+  { name: "cost", description: "Show this session's token + $ usage" },
+  { name: "explain", description: "Summarise current filters and the visible users" },
+  { name: "compare", args: "<name1> and <name2>", description: "Compare two users by their key attributes" },
+];
+
+function helpMessage(): string {
+  return [
+    "Slash commands:",
+    ...SLASH_COMMANDS.map((c) => `  /${c.name}${c.args ? ` ${c.args}` : ""}  — ${c.description}`),
+  ].join("\n");
+}
+
+function costMessage(usage: ChatUsage): string {
+  return [
+    `Session usage:`,
+    `  Input tokens:  ${usage.input_tokens.toLocaleString()}`,
+    `  Output tokens: ${usage.output_tokens.toLocaleString()}`,
+    `  Total:         ${totalTokens(usage).toLocaleString()}`,
+    `  Cost:          ${formatCost(costUsd(usage))}`,
+  ].join("\n");
+}
+
+/** Returns null if input is not a slash command. Otherwise: {handledLocally, expandedPrompt?}. */
+function parseSlash(text: string): { handledLocally: true; localText: string } | { handledLocally: false; prompt: string } | null {
+  if (!text.startsWith("/")) return null;
+  const trimmed = text.trim();
+  const [cmd, ...rest] = trimmed.slice(1).split(/\s+/);
+  const args = rest.join(" ");
+  switch (cmd) {
+    case "help":
+      return { handledLocally: true, localText: helpMessage() };
+    case "clear":
+      return { handledLocally: true, localText: "__clear__" };
+    case "cost":
+      return { handledLocally: true, localText: "__cost__" };
+    case "explain":
+      return {
+        handledLocally: false,
+        prompt:
+          "Explain my current dashboard filters in plain English and describe what the visible users have in common (department/role/gender skew). Be concise.",
+      };
+    case "compare": {
+      const parts = args.split(/\s+and\s+/i);
+      if (parts.length !== 2) {
+        return { handledLocally: true, localText: 'Usage: /compare <name1> and <name2>' };
+      }
+      return {
+        handledLocally: false,
+        prompt: `Find users named "${parts[0].trim()}" and "${parts[1].trim()}" with query_users, then compare them side-by-side by age, role, department, title and location. Be brief.`,
+      };
+    }
+    default:
+      return { handledLocally: true, localText: `Unknown command: /${cmd}. Type /help for the list.` };
+  }
+}
+
 export function ChatWidget() {
   const ctx = useContext(DashboardCtx);
   const [open, setOpen] = useState(false);
@@ -72,6 +162,7 @@ export function ChatWidget() {
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [usage, setUsage] = useState<ChatUsage>(EMPTY_USAGE);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -112,13 +203,64 @@ export function ChatWidget() {
   function resetChat() {
     setTurns([]);
     setError(null);
+    setUsage(EMPTY_USAGE);
   }
 
-  async function sendMessage(text: string) {
-    if (!ctx || !apiKey || !text.trim() || pending) return;
+  function restoreFilters(prev: FiltersSnapshot, turnIdx: number, callIdx: number) {
+    if (!ctx) return;
+    ctx.clear();
+    const keys: Array<keyof Filters> = ["q", "role", "department", "title", "gender", "country", "state"];
+    for (const k of keys) {
+      const v = prev[k as keyof FiltersSnapshot];
+      if (typeof v === "string" && v) ctx.setFilter(k, v);
+    }
+    if (typeof prev.ageMin === "number" || typeof prev.ageMax === "number") {
+      ctx.onAgeChange([prev.ageMin ?? 0, prev.ageMax ?? 200]);
+    }
+    setTurns((prevTurns) => {
+      const next = [...prevTurns];
+      const t = next[turnIdx];
+      if (!t || !t.toolCalls) return prevTurns;
+      const newCalls = [...t.toolCalls];
+      newCalls[callIdx] = { ...newCalls[callIdx], undone: true };
+      next[turnIdx] = { ...t, toolCalls: newCalls };
+      return next;
+    });
+  }
+
+  async function sendMessage(rawText: string) {
+    if (!ctx || !rawText.trim() || pending) return;
     setError(null);
-    const userTurn: ChatTurn = { role: "user", text: text.trim() };
-    const baseMessages: AnthropicMessage[] = [...apiMessages, { role: "user", content: text.trim() }];
+
+    // Slash command handling — happens before any LLM call.
+    const slash = parseSlash(rawText.trim());
+    let promptText = rawText.trim();
+    if (slash) {
+      if (slash.handledLocally) {
+        if (slash.localText === "__clear__") {
+          resetChat();
+          setInput("");
+          return;
+        }
+        if (slash.localText === "__cost__") {
+          setTurns((t) => [...t, { role: "user", text: rawText.trim() }, { role: "system", text: costMessage(usage) }]);
+          setInput("");
+          return;
+        }
+        setTurns((t) => [...t, { role: "user", text: rawText.trim() }, { role: "system", text: slash.localText }]);
+        setInput("");
+        return;
+      }
+      promptText = slash.prompt;
+    }
+
+    if (!apiKey) {
+      setError("Anthropic API key required — open settings.");
+      return;
+    }
+
+    const userTurn: ChatTurn = { role: "user", text: rawText.trim() };
+    const baseMessages: AnthropicMessage[] = [...apiMessages, { role: "user", content: promptText }];
     setTurns((t) => [...t, userTurn]);
     setInput("");
     setPending(true);
@@ -135,7 +277,7 @@ export function ChatWidget() {
     try {
       const snapshot = ctx.getCurrentFilters();
       const system = buildSystem(ctx.users.length, snapshot);
-      const { finalText } = await runChat({
+      const { finalText, usage: runUsage } = await runChat({
         apiKey,
         model: MODEL,
         system,
@@ -145,7 +287,7 @@ export function ChatWidget() {
         onAssistantStep: (blocks: AnthropicContentBlock[]) => {
           const calls = blocks
             .filter((b): b is Extract<AnthropicContentBlock, { type: "tool_use" }> => b.type === "tool_use")
-            .map((b) => ({ name: b.name, input: b.input }));
+            .map((b): ToolCallRecord => ({ name: b.name, input: b.input }));
           if (calls.length) {
             setTurns((prev) => {
               const next = [...prev];
@@ -159,8 +301,31 @@ export function ChatWidget() {
             });
           }
         },
+        onToolResult: (name, _input, output) => {
+          // Patch the matching tool-call record with its output and any diff/previous_filters.
+          // Match by name + position: the latest call of this name without an output yet.
+          setTurns((prev) => {
+            const next = [...prev];
+            const idx = stepIdx >= 0 ? stepIdx : next.length - 1;
+            const cur = next[idx];
+            if (!cur || !cur.toolCalls) return prev;
+            const calls = [...cur.toolCalls];
+            const matchIdx = calls.findIndex((c) => c.name === name && c.output === undefined);
+            if (matchIdx === -1) return prev;
+            const out = output as Record<string, unknown> | undefined;
+            calls[matchIdx] = {
+              ...calls[matchIdx],
+              output,
+              previousFilters: (out?.previous_filters as FiltersSnapshot | undefined) ?? undefined,
+              diff: (out?.diff as Record<string, { from: unknown; to: unknown }> | undefined) ?? undefined,
+            };
+            next[idx] = { ...cur, toolCalls: calls };
+            return next;
+          });
+        },
         onToolCall: (name, toolInput) => executeTool(name, toolInput, ctx),
       });
+      setUsage((prev) => addUsage(prev, runUsage));
 
       setTurns((prev) => {
         const next = [...prev];
@@ -218,7 +383,14 @@ export function ChatWidget() {
             <div className="w-7 h-7 rounded-full bg-[#185FA5] text-white flex items-center justify-center text-[12px] font-semibold">AI</div>
             <div className="flex-1 min-w-0">
               <p className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-100 truncate">Ask about these users</p>
-              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate">{ctx.users.length} users · {MODEL}</p>
+              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate" title={`${ctx.users.length} users · ${MODEL}`}>
+                {ctx.users.length} users · {MODEL}
+                {totalTokens(usage) > 0 && (
+                  <span title="Session tokens / cost">
+                    {" · "}{formatTokens(totalTokens(usage))} tok · {formatCost(costUsd(usage))}
+                  </span>
+                )}
+              </p>
             </div>
             <button
               type="button"
@@ -307,37 +479,81 @@ export function ChatWidget() {
               <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
                 {turns.length === 0 && (
                   <div className="text-[12px] text-zinc-400 dark:text-zinc-500">
-                    Ask anything about the {ctx.users.length} users — counts, distributions, filters.
+                    Ask anything about the {ctx.users.length} users — counts, distributions, filters. Type <span className="font-mono">/help</span> for commands.
                   </div>
                 )}
                 {turns.map((t, i) => (
-                  <div key={i} className={t.role === "user" ? "flex justify-end" : "flex justify-start"}>
-                    <div
-                      className={
-                        t.role === "user"
-                          ? "max-w-[85%] bg-[#185FA5] text-white px-3 py-2 rounded-2xl rounded-br-sm text-[13px] whitespace-pre-wrap"
-                          : "max-w-[85%] bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-100 px-3 py-2 rounded-2xl rounded-bl-sm text-[13px] whitespace-pre-wrap"
-                      }
-                    >
-                      {t.toolCalls && t.toolCalls.length > 0 && (
-                        <div className="mb-1.5 flex flex-wrap gap-1">
-                          {t.toolCalls.map((c, j) => (
-                            <span
-                              key={j}
-                              className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-semibold bg-white/60 dark:bg-zinc-900/60 text-zinc-600 dark:text-zinc-300 px-1.5 py-0.5 rounded"
-                              title={summarizeToolInput(c.input)}
-                            >
-                              <svg className="w-2.5 h-2.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8">
-                                <path d="M6 3l4 5-4 5" />
-                              </svg>
-                              {c.name}
-                            </span>
-                          ))}
-                        </div>
-                      )}
+                  t.role === "system" ? (
+                    <div key={i} className="text-[12px] text-zinc-500 dark:text-zinc-400 border border-dashed border-zinc-200 dark:border-zinc-700 rounded-lg px-3 py-2 whitespace-pre-wrap font-mono">
                       {t.text}
                     </div>
-                  </div>
+                  ) : (
+                    <div key={i} className="space-y-1.5">
+                      <div className={t.role === "user" ? "flex justify-end" : "flex justify-start"}>
+                        <div
+                          className={
+                            t.role === "user"
+                              ? "max-w-[85%] bg-[#185FA5] text-white px-3 py-2 rounded-2xl rounded-br-sm text-[13px] whitespace-pre-wrap"
+                              : "max-w-[85%] bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-100 px-3 py-2 rounded-2xl rounded-bl-sm text-[13px] whitespace-pre-wrap"
+                          }
+                        >
+                          {t.toolCalls && t.toolCalls.length > 0 && (
+                            <div className="mb-1.5 flex flex-wrap gap-1">
+                              {t.toolCalls.map((c, j) => (
+                                <span
+                                  key={j}
+                                  className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-semibold bg-white/60 dark:bg-zinc-900/60 text-zinc-600 dark:text-zinc-300 px-1.5 py-0.5 rounded"
+                                  title={summarizeToolInput(c.input)}
+                                >
+                                  <svg className="w-2.5 h-2.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8">
+                                    <path d="M6 3l4 5-4 5" />
+                                  </svg>
+                                  {c.name}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {t.text}
+                        </div>
+                      </div>
+                      {/* Diff card with Undo for filter-changing tools */}
+                      {t.toolCalls?.map((c, j) =>
+                        (c.name === "apply_filters" || c.name === "clear_filters") && c.previousFilters ? (
+                          <div
+                            key={`diff-${j}`}
+                            className="ml-2 text-[11px] bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700 rounded-lg px-2.5 py-1.5 flex items-start gap-2"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <div className="font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider text-[10px]">
+                                {c.name === "clear_filters" ? "filters cleared" : "filters changed"}
+                              </div>
+                              <div className="mt-0.5 flex flex-wrap gap-1">
+                                {c.name === "apply_filters" && c.diff
+                                  ? Object.entries(c.diff).map(([k, v]) => (
+                                      <span key={k} className="font-mono text-zinc-600 dark:text-zinc-300">
+                                        {k}: <span className="line-through text-zinc-400">{String(v.from || "—")}</span>{" "}
+                                        →{" "}
+                                        <span className="text-green-600 dark:text-green-400">{String(v.to || "—")}</span>
+                                      </span>
+                                    ))
+                                  : (
+                                      <span className="font-mono text-zinc-500 dark:text-zinc-400">all filters reset</span>
+                                    )}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              disabled={c.undone}
+                              onClick={() => restoreFilters(c.previousFilters!, i, j)}
+                              className="text-[11px] px-2 py-0.5 rounded border border-zinc-300 dark:border-zinc-600 text-zinc-600 dark:text-zinc-300 hover:bg-white dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+                            >
+                              {c.undone ? "Undone" : "Undo"}
+                            </button>
+                          </div>
+                        ) : null,
+                      )}
+                    </div>
+                  )
                 ))}
                 {pending && (
                   <div className="flex justify-start">
@@ -369,6 +585,13 @@ export function ChatWidget() {
                       {s}
                     </button>
                   ))}
+                  <button
+                    type="button"
+                    onClick={() => void sendMessage("/help")}
+                    className="text-[11px] px-2 py-1 rounded-full border border-dashed border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors font-mono"
+                  >
+                    /help
+                  </button>
                 </div>
               )}
 

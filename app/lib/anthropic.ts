@@ -1,3 +1,5 @@
+import { addUsage, EMPTY_USAGE, type ChatUsage } from "./pricing";
+
 export interface AnthropicTool {
   name: string;
   description: string;
@@ -22,6 +24,7 @@ export interface RunChatParams {
   tools: AnthropicTool[];
   onToolCall: (name: string, input: unknown) => Promise<unknown> | unknown;
   onAssistantStep?: (blocks: AnthropicContentBlock[]) => void;
+  onToolResult?: (name: string, input: unknown, output: unknown, isError: boolean) => void;
   signal?: AbortSignal;
   maxIterations?: number;
 }
@@ -29,6 +32,7 @@ export interface RunChatParams {
 export interface RunChatResult {
   finalText: string;
   messages: AnthropicMessage[];
+  usage: ChatUsage;
 }
 
 const API_URL = "https://api.anthropic.com/v1/messages";
@@ -41,10 +45,12 @@ export async function runChat({
   tools,
   onToolCall,
   onAssistantStep,
+  onToolResult,
   signal,
   maxIterations = 6,
 }: RunChatParams): Promise<RunChatResult> {
   const convo: AnthropicMessage[] = [...messages];
+  let usage: ChatUsage = EMPTY_USAGE;
 
   for (let i = 0; i < maxIterations; i++) {
     const body = {
@@ -82,7 +88,10 @@ export async function runChat({
     const data = (await res.json()) as {
       content: AnthropicContentBlock[];
       stop_reason: string;
+      usage?: Partial<ChatUsage>;
     };
+
+    if (data.usage) usage = addUsage(usage, data.usage);
 
     const blocks = data.content ?? [];
     onAssistantStep?.(blocks);
@@ -96,23 +105,26 @@ export async function runChat({
         .map((b) => b.text)
         .join("\n")
         .trim();
-      return { finalText, messages: convo };
+      return { finalText, messages: convo, usage };
     }
 
     const toolResults: AnthropicContentBlock[] = [];
     for (const tu of toolUses) {
       try {
         const out = await onToolCall(tu.name, tu.input);
+        onToolResult?.(tu.name, tu.input, out, false);
         toolResults.push({
           type: "tool_result",
           tool_use_id: tu.id,
           content: JSON.stringify(out),
         });
       } catch (e) {
+        const errPayload = { error: e instanceof Error ? e.message : String(e) };
+        onToolResult?.(tu.name, tu.input, errPayload, true);
         toolResults.push({
           type: "tool_result",
           tool_use_id: tu.id,
-          content: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }),
+          content: JSON.stringify(errPayload),
           is_error: true,
         });
       }
