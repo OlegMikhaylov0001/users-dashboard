@@ -2,7 +2,7 @@
 
 A responsive admin dashboard for browsing, searching, filtering, and analysing 208 users from the [DummyJSON API](https://dummyjson.com/docs/users). Built with Next.js 16, React 19, TypeScript, and Tailwind CSS v4.
 
-It also ships with a built-in **AI chat assistant** (`claude-sonnet-4-6`) that can answer aggregate questions about the dataset *and* drive the dashboard UI via tool calls — ask "show only female moderators" and the filter chips actually change.
+It also ships with a built-in **AI chat assistant** (Anthropic Claude or Google Gemini — switch in settings) that can answer aggregate questions about the dataset *and* drive the dashboard UI via tool calls — ask "show only female moderators" and the filter chips actually change.
 
 ---
 
@@ -68,7 +68,14 @@ The main view is a single-page client dashboard. All 208 users are fetched serve
 
 ### AI chat assistant (`/`, floating widget)
 
-A floating action button in the bottom-right corner opens a chat panel ("Ask about these users"). The agent uses Anthropic's `claude-sonnet-4-6` with five tools:
+A floating action button in the bottom-right corner opens a chat panel ("Ask about these users"). The agent supports **two providers** (chosen in the settings dialog):
+
+| Provider | Default model | Pricing | When to use |
+|---|---|---|---|
+| Anthropic | `claude-sonnet-4-6` | Paid — your key, your bill | Production-quality answers, complex multi-step reasoning |
+| Google | `gemini-2.5-flash` | Free tier (~10 req/min, 250/day) | Dev, demos, smoke-testing without burning tokens |
+
+Both providers are wired through the same five tools:
 
 | Tool | What it does |
 |---|---|
@@ -128,16 +135,28 @@ The standard pattern of two stacked `<input type="range" class="opacity-0">` ele
 
 A right-side detail panel that slides out when you click a list item is a common pattern, but it reads as "selection" rather than "detail" — the user clicked something and expected to go somewhere, not have a panel appear beside them. A centred overlay with a backdrop is unambiguous: you opened something, you close it with `Esc` or the backdrop.
 
-### Why the chat assistant calls Anthropic directly from the browser
+### Why two providers behind one interface
 
-The dashboard is published as a static export (`output: "export"` in `next.config.ts`) so it can be hosted on GitHub Pages — there is no Node server at runtime, so there is no API route that could hold an Anthropic key.
+The chat ships with both **Anthropic** and **Google** behind a small registry (`app/lib/providers.ts`). The registry exposes a `runChat` function with an identical signature for every provider; the message format, tool schemas, and `ChatUsage` shape are normalised, and each provider's adapter translates to its native wire format (Anthropic Messages API for Claude, `generativelanguage.googleapis.com/v1beta` for Gemini).
+
+Three reasons for the split:
+
+1. **Dev cost** — Gemini 2.5 Flash is free up to 250 requests/day. Day-to-day testing of new tools, slash commands, and the agent loop no longer burns Anthropic credits.
+2. **Portability** — adding GPT-4 / Mistral / DeepSeek in future is a single new adapter file plus one entry in the registry. The UI, cost meter, slash commands, and tool executor are provider-agnostic.
+3. **Portfolio signal** — multi-provider thinking with a normalised internal format is a senior pattern (LangChain / Vercel AI SDK do something similar). It also gives a natural foundation for **model routing** (cheap classifier picks the provider per query) in a future PR.
+
+The Anthropic adapter posts JSON to `api.anthropic.com/v1/messages` with `anthropic-dangerous-direct-browser-access: true`. The Gemini adapter posts to `generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key=...`; it also strips JSON Schema keywords Gemini rejects (`additionalProperties`, `$schema`, `default`) and maintains a tool-call-id → name map so cross-provider message history round-trips cleanly.
+
+### Why the chat assistant calls the LLM directly from the browser
+
+The dashboard is published as a static export (`output: "export"` in `next.config.ts`) so it can be hosted on GitHub Pages — there is no Node server at runtime, so there is no API route that could hold an API key.
 
 Two options exist:
 
-1. **Direct browser → `api.anthropic.com` calls** with the `anthropic-dangerous-direct-browser-access: true` header. The user pastes their own API key into the settings dialog; it lives in `localStorage` under `ud_anthropic_key` and never leaves the browser.
+1. **Direct browser → provider calls.** The user pastes their own API key into the settings dialog; it lives in `localStorage` (`ud_anthropic_key` / `ud_google_key`) and never leaves the browser.
 2. A Cloudflare Worker / Vercel Edge function as a proxy with the key in `env`.
 
-Option 1 is shipped because it keeps the project a true static site and lets reviewers try the chat with their own key without provisioning a separate service. The settings dialog states "Demo only — your key, your bill" so the trade-off is explicit. For a publicly shared deployment, swap in option 2.
+Option 1 is shipped because it keeps the project a true static site and lets reviewers try the chat with their own key without provisioning a separate service. The settings dialog states the cost trade-off per provider so it is explicit. For a publicly shared deployment, swap in option 2.
 
 ### Why a React Context for tool execution
 
@@ -156,7 +175,10 @@ app/
 │   ├── palette.ts          # deterministic colour palette for avatars/chips
 │   ├── users.ts            # getFilterOptions (extract unique depts, countries…)
 │   ├── anthropic.ts        # Anthropic Messages API client + tool-use agent loop
-│   └── chatTools.ts        # tool schemas + executor (stats/query/apply/clear/open)
+│   ├── gemini.ts           # Google Gemini API client + tool-use agent loop
+│   ├── providers.ts        # registry — selects runChat impl + pricing per provider id
+│   ├── pricing.ts          # per-provider token pricing tables + cost helpers
+│   └── chatTools.ts        # tool schemas (zod) + executor (stats/query/apply/clear/open)
 ├── components/
 │   ├── Dashboard.tsx       # layout shell — wires hooks to child components
 │   ├── Sidebar.tsx         # nav drawer
@@ -212,16 +234,19 @@ app/
 
 1. `npm run dev`, open `http://localhost:3000`.
 2. Click the blue chat button in the bottom-right corner.
-3. Paste an Anthropic API key (`sk-ant-...`) into the settings dialog. Get one at [console.anthropic.com](https://console.anthropic.com/). The key is stored in `localStorage` under `ud_anthropic_key`.
+3. In the settings dialog pick a provider:
+   - **Anthropic (Claude)** — paid; get a key at [console.anthropic.com](https://console.anthropic.com/) (`sk-ant-...`). Stored in `localStorage` under `ud_anthropic_key`.
+   - **Google (Gemini, free tier)** — free up to ~10 RPM / 250 RPD; get a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (`AIzaSy...`). Stored under `ud_google_key`.
 4. Ask anything — "show only female moderators", "top 5 countries among admins", "open the card of Ava Taylor".
 
-To forget the key: click the gear icon in the chat header → "Forget current key", or run `localStorage.removeItem("ud_anthropic_key")` in the browser console.
+The selected provider is persisted under `ud_provider`. Both keys can coexist — switching providers in the dialog doesn't lose either one. To forget a key: pick its provider, click gear → "Forget current key", or run `localStorage.removeItem("ud_anthropic_key")` / `removeItem("ud_google_key")` in the console.
 
-### Switching models or expanding tools
+### Switching models or adding a provider
 
-- The model is hard-coded in `app/components/ChatWidget.tsx` (`const MODEL = "claude-sonnet-4-6"`).
-- Tools live in `app/lib/chatTools.ts`. Each tool has a JSON schema + a local executor that operates on the in-memory `users` array and the dashboard actions exposed through `DashboardCtx`. Adding a new tool is one schema entry + one switch case in `executeTool`.
-- The agent loop is in `app/lib/anthropic.ts` — up to 6 tool-use iterations per turn, then it returns the final assistant text.
+- The default model per provider is set in `app/lib/providers.ts` (`defaultModel`).
+- Adding a new provider is a single adapter file (export `runChat` matching the `RunChatParams` / `RunChatResult` types from `anthropic.ts`) + one entry in the `PROVIDERS` registry. The UI, cost meter, slash commands, and `executeTool` need no changes.
+- Tools live in `app/lib/chatTools.ts`. Each tool has a zod schema + a local executor that operates on the in-memory `users` array and the dashboard actions exposed through `DashboardCtx`. Adding a new tool is one schema + one switch case in `executeTool`.
+- The agent loop lives in `app/lib/anthropic.ts` (and `gemini.ts`) — up to 6 tool-use iterations per turn, then it returns the final assistant text and aggregated `ChatUsage`.
 
 ### Hosting with a real backend
 
