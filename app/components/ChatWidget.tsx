@@ -3,12 +3,17 @@
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { DashboardCtx } from "./dashboard-ctx";
 import { ANTHROPIC_TOOLS, executeTool } from "../lib/chatTools";
-import { runChat, type AnthropicContentBlock, type AnthropicMessage } from "../lib/anthropic";
+import { type AnthropicContentBlock, type AnthropicMessage } from "../lib/anthropic";
 import { addUsage, costUsd, EMPTY_USAGE, formatCost, formatTokens, totalTokens, type ChatUsage } from "../lib/pricing";
+import {
+  DEFAULT_PROVIDER,
+  isProviderId,
+  PROVIDER_IDS,
+  PROVIDER_STORAGE_KEY,
+  PROVIDERS,
+  type ProviderId,
+} from "../lib/providers";
 import type { Filters } from "../hooks/useDashboard";
-
-const STORAGE_KEY = "ud_anthropic_key";
-const MODEL = "claude-sonnet-4-6";
 
 interface FiltersSnapshot {
   q: string;
@@ -104,13 +109,13 @@ function helpMessage(): string {
   ].join("\n");
 }
 
-function costMessage(usage: ChatUsage): string {
+function costMessage(usage: ChatUsage, providerLabel: string, pricing: import("../lib/pricing").PricingPerM): string {
   return [
-    `Session usage:`,
+    `Session usage (${providerLabel}):`,
     `  Input tokens:  ${usage.input_tokens.toLocaleString()}`,
     `  Output tokens: ${usage.output_tokens.toLocaleString()}`,
     `  Total:         ${totalTokens(usage).toLocaleString()}`,
-    `  Cost:          ${formatCost(costUsd(usage))}`,
+    `  Cost:          ${formatCost(costUsd(usage, pricing))}`,
   ].join("\n");
 }
 
@@ -151,10 +156,20 @@ function parseSlash(text: string): { handledLocally: true; localText: string } |
 export function ChatWidget() {
   const ctx = useContext(DashboardCtx);
   const [open, setOpen] = useState(false);
-  const [apiKey, setApiKey] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    return window.localStorage.getItem(STORAGE_KEY);
+  const [provider, setProvider] = useState<ProviderId>(() => {
+    if (typeof window === "undefined") return DEFAULT_PROVIDER;
+    const stored = window.localStorage.getItem(PROVIDER_STORAGE_KEY);
+    return isProviderId(stored) ? stored : DEFAULT_PROVIDER;
   });
+  const [apiKeys, setApiKeys] = useState<Record<ProviderId, string | null>>(() => {
+    if (typeof window === "undefined") return { anthropic: null, google: null };
+    return {
+      anthropic: window.localStorage.getItem(PROVIDERS.anthropic.apiKeyStorageKey),
+      google: window.localStorage.getItem(PROVIDERS.google.apiKeyStorageKey),
+    };
+  });
+  const apiKey = apiKeys[provider];
+  const providerCfg = PROVIDERS[provider];
   const [keyInput, setKeyInput] = useState("");
   const [persistKey, setPersistKey] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -186,18 +201,26 @@ export function ChatWidget() {
   function saveKey() {
     const trimmed = keyInput.trim();
     if (!trimmed) return;
-    setApiKey(trimmed);
+    setApiKeys((prev) => ({ ...prev, [provider]: trimmed }));
     if (persistKey && typeof window !== "undefined") {
-      window.localStorage.setItem(STORAGE_KEY, trimmed);
+      window.localStorage.setItem(providerCfg.apiKeyStorageKey, trimmed);
     }
     setKeyInput("");
     setSettingsOpen(false);
   }
 
   function forgetKey() {
-    setApiKey(null);
-    if (typeof window !== "undefined") window.localStorage.removeItem(STORAGE_KEY);
+    setApiKeys((prev) => ({ ...prev, [provider]: null }));
+    if (typeof window !== "undefined") window.localStorage.removeItem(providerCfg.apiKeyStorageKey);
     setSettingsOpen(false);
+  }
+
+  function switchProvider(next: ProviderId) {
+    if (next === provider) return;
+    setProvider(next);
+    setKeyInput(""); // avoid accidentally saving the wrong-provider key from the input draft
+    setError(null);
+    if (typeof window !== "undefined") window.localStorage.setItem(PROVIDER_STORAGE_KEY, next);
   }
 
   function resetChat() {
@@ -243,7 +266,11 @@ export function ChatWidget() {
           return;
         }
         if (slash.localText === "__cost__") {
-          setTurns((t) => [...t, { role: "user", text: rawText.trim() }, { role: "system", text: costMessage(usage) }]);
+          setTurns((t) => [
+            ...t,
+            { role: "user", text: rawText.trim() },
+            { role: "system", text: costMessage(usage, providerCfg.shortLabel, providerCfg.pricing) },
+          ]);
           setInput("");
           return;
         }
@@ -255,7 +282,7 @@ export function ChatWidget() {
     }
 
     if (!apiKey) {
-      setError("Anthropic API key required — open settings.");
+      setError(`${providerCfg.shortLabel} API key required — open settings.`);
       return;
     }
 
@@ -277,9 +304,9 @@ export function ChatWidget() {
     try {
       const snapshot = ctx.getCurrentFilters();
       const system = buildSystem(ctx.users.length, snapshot);
-      const { finalText, usage: runUsage } = await runChat({
+      const { finalText, usage: runUsage } = await providerCfg.runChat({
         apiKey,
-        model: MODEL,
+        model: providerCfg.defaultModel,
         system,
         messages: baseMessages,
         tools: ANTHROPIC_TOOLS,
@@ -383,11 +410,14 @@ export function ChatWidget() {
             <div className="w-7 h-7 rounded-full bg-[#185FA5] text-white flex items-center justify-center text-[12px] font-semibold">AI</div>
             <div className="flex-1 min-w-0">
               <p className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-100 truncate">Ask about these users</p>
-              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate" title={`${ctx.users.length} users · ${MODEL}`}>
-                {ctx.users.length} users · {MODEL}
+              <p
+                className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate"
+                title={`${ctx.users.length} users · ${providerCfg.defaultModel} (${providerCfg.shortLabel})`}
+              >
+                {ctx.users.length} users · {providerCfg.shortLabel}: {providerCfg.defaultModel}
                 {totalTokens(usage) > 0 && (
-                  <span title="Session tokens / cost">
-                    {" · "}{formatTokens(totalTokens(usage))} tok · {formatCost(costUsd(usage))}
+                  <span title={`Session tokens / cost (${providerCfg.pricingNote})`}>
+                    {" · "}{formatTokens(totalTokens(usage))} tok · {formatCost(costUsd(usage, providerCfg.pricing))}
                   </span>
                 )}
               </p>
@@ -417,11 +447,45 @@ export function ChatWidget() {
 
           {needsKey ? (
             <div className="flex-1 overflow-y-auto px-4 py-4 text-[13px] text-zinc-700 dark:text-zinc-300">
-              <p className="font-semibold mb-1">Anthropic API key</p>
+              <p className="font-semibold mb-2">Provider</p>
+              <div className="flex flex-col gap-1 mb-4">
+                {PROVIDER_IDS.map((id) => {
+                  const p = PROVIDERS[id];
+                  const hasKey = Boolean(apiKeys[id]);
+                  return (
+                    <label
+                      key={id}
+                      className={`flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer border ${
+                        provider === id
+                          ? "border-[#185FA5] bg-[#185FA5]/5"
+                          : "border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="provider"
+                        checked={provider === id}
+                        onChange={() => switchProvider(id)}
+                        className="cursor-pointer"
+                      />
+                      <span className="flex-1 text-[13px]">{p.label}</span>
+                      <span
+                        className={`text-[10px] uppercase tracking-wider font-semibold ${
+                          hasKey ? "text-green-600 dark:text-green-400" : "text-zinc-400"
+                        }`}
+                      >
+                        {hasKey ? "key set" : "no key"}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+
+              <p className="font-semibold mb-1">{providerCfg.shortLabel} API key</p>
               <p className="text-[12px] text-zinc-500 dark:text-zinc-400 mb-3">
-                Demo only — your key, your bill. The request goes directly from your browser to{" "}
-                <a className="underline" href="https://console.anthropic.com/" target="_blank" rel="noreferrer">
-                  console.anthropic.com
+                {providerCfg.pricingNote} The request goes directly from your browser to{" "}
+                <a className="underline" href={providerCfg.apiKeyConsoleUrl} target="_blank" rel="noreferrer">
+                  {providerCfg.apiKeyConsoleLabel}
                 </a>
                 .
               </p>
@@ -429,7 +493,7 @@ export function ChatWidget() {
                 type="password"
                 value={keyInput}
                 onChange={(e) => setKeyInput(e.target.value)}
-                placeholder="sk-ant-..."
+                placeholder={providerCfg.apiKeyPlaceholder}
                 className="w-full h-9 px-3 border border-zinc-200 dark:border-zinc-700 rounded-lg bg-zinc-50 dark:bg-zinc-800 text-[13px] placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-[#185FA5]/30 focus:border-[#185FA5]"
               />
               <label className="flex items-center gap-2 mt-2 text-[12px] text-zinc-500 dark:text-zinc-400">
