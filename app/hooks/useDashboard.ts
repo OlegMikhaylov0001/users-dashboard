@@ -29,7 +29,7 @@ export function statPct(n: number, total: number) {
   return total ? `${Math.round((n / total) * 100)}%` : "0%";
 }
 
-function applyFilters(users: User[], filters: Filters, ageFilter: [number, number] | null): User[] {
+export function applyFilters(users: User[], filters: Filters, ageFilter: [number, number] | null): User[] {
   let r = users;
   if (filters.q) {
     const q = filters.q.toLowerCase();
@@ -47,7 +47,7 @@ function applyFilters(users: User[], filters: Filters, ageFilter: [number, numbe
   return r;
 }
 
-function sortUsers(users: User[], sort: SortKey): User[] {
+export function sortUsers(users: User[], sort: SortKey): User[] {
   return [...users].sort((a, b) => {
     if (sort === "lastName") return a.lastName.localeCompare(b.lastName);
     if (sort === "age")      return a.age - b.age;
