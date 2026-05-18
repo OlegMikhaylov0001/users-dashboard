@@ -2,6 +2,8 @@
 
 A responsive admin dashboard for browsing, searching, filtering, and analysing 208 users from the [DummyJSON API](https://dummyjson.com/docs/users). Built with Next.js 16, React 19, TypeScript, and Tailwind CSS v4.
 
+It also ships with a built-in **AI chat assistant** (`claude-sonnet-4-6`) that can answer aggregate questions about the dataset *and* drive the dashboard UI via tool calls — ask "show only female moderators" and the filter chips actually change.
+
 ---
 
 ## Quick start
@@ -64,6 +66,28 @@ The main view is a single-page client dashboard. All 208 users are fetched serve
 - Shows: contact, age/gender, company, department, city/country
 - Footer link → full profile page
 
+### AI chat assistant (`/`, floating widget)
+
+A floating action button in the bottom-right corner opens a chat panel ("Ask about these users"). The agent uses Anthropic's `claude-sonnet-4-6` with five tools:
+
+| Tool | What it does |
+|---|---|
+| `get_users_stats` | Counts, averages, age buckets, top-N breakdowns over any filter slice |
+| `query_users` | Returns a sample of matching users (up to 20 rows) with selected fields |
+| `apply_filters` | **Sets the actual dashboard filter chips** — the list re-renders live |
+| `clear_filters` | Resets all dashboard filters |
+| `open_user` | Opens the user-details modal by id |
+
+The agent runs in a tool-use loop (up to 6 iterations) so it can chain calls — e.g. "reset filters and open Ava Taylor's card" triggers `clear_filters` → `query_users` → `open_user` in a single turn.
+
+The current dashboard filters are injected into the system prompt before every request, so the model knows what slice is already visible to the user.
+
+Verified examples (run during development):
+
+- *"What's the average age of engineering users in the US?"* → calls `get_users_stats`, replies with the number (33 years, 19 users)
+- *"Show only female moderators"* → calls `apply_filters({role:"moderator", gender:"female"})`, chips in the top bar update, list shows 5 users
+- *"Reset all filters and open the card of Ava Taylor"* → 3 tool calls in sequence, modal opens
+
 ### User detail page (`/users/[id]`)
 
 208 static pages pre-rendered at build time via `generateStaticParams`. Each page shows the complete user record organised in labelled sections: Personal · Contact & Address · Company · Banking · Crypto · System.
@@ -104,6 +128,21 @@ The standard pattern of two stacked `<input type="range" class="opacity-0">` ele
 
 A right-side detail panel that slides out when you click a list item is a common pattern, but it reads as "selection" rather than "detail" — the user clicked something and expected to go somewhere, not have a panel appear beside them. A centred overlay with a backdrop is unambiguous: you opened something, you close it with `Esc` or the backdrop.
 
+### Why the chat assistant calls Anthropic directly from the browser
+
+The dashboard is published as a static export (`output: "export"` in `next.config.ts`) so it can be hosted on GitHub Pages — there is no Node server at runtime, so there is no API route that could hold an Anthropic key.
+
+Two options exist:
+
+1. **Direct browser → `api.anthropic.com` calls** with the `anthropic-dangerous-direct-browser-access: true` header. The user pastes their own API key into the settings dialog; it lives in `localStorage` under `ud_anthropic_key` and never leaves the browser.
+2. A Cloudflare Worker / Vercel Edge function as a proxy with the key in `env`.
+
+Option 1 is shipped because it keeps the project a true static site and lets reviewers try the chat with their own key without provisioning a separate service. The settings dialog states "Demo only — your key, your bill" so the trade-off is explicit. For a publicly shared deployment, swap in option 2.
+
+### Why a React Context for tool execution
+
+Chat tools like `apply_filters` need to mutate the same state that the rest of the dashboard reads from (`useDashboard`). Threading those setters through props from `Dashboard.tsx` → `ChatWidget.tsx` would require lifting actions through every intermediate component. Instead a small `DashboardCtx` exposes only what tools need (`users`, `setFilter`, `applyPreset`, `clear`, `onAgeChange`, `setSelected`, `getCurrentFilters`). The chat widget pulls actions from context; `useDashboard` remains the single source of truth.
+
 ### Component structure
 
 ```
@@ -115,12 +154,16 @@ app/
 ├── lib/
 │   ├── api.ts              # fetch wrapper with ISR cache
 │   ├── palette.ts          # deterministic colour palette for avatars/chips
-│   └── users.ts            # getFilterOptions (extract unique depts, countries…)
+│   ├── users.ts            # getFilterOptions (extract unique depts, countries…)
+│   ├── anthropic.ts        # Anthropic Messages API client + tool-use agent loop
+│   └── chatTools.ts        # tool schemas + executor (stats/query/apply/clear/open)
 ├── components/
 │   ├── Dashboard.tsx       # layout shell — wires hooks to child components
 │   ├── Sidebar.tsx         # nav drawer
 │   ├── StatsCards.tsx      # 6-metric strip, collapsible on mobile
 │   ├── Charts.tsx          # RoleDonut, AgeHistogram, DeptBar, GenderBreakdown
+│   ├── ChatWidget.tsx      # floating chat panel (FAB + settings + message list)
+│   ├── dashboard-ctx.ts    # React context exposing dashboard actions to chat tools
 │   ├── dark-ctx.ts         # React context for isDark flag
 │   ├── ui/
 │   │   ├── FilterChip.tsx  # dropdown chip with search
@@ -162,6 +205,29 @@ app/
 | Data | [DummyJSON](https://dummyjson.com) — no account needed |
 | Charts | Hand-written SVG |
 | Extra dependencies | None |
-# users-dashboard
-# users-dashboard
-# users-dashboard
+
+---
+
+## Using the chat assistant
+
+1. `npm run dev`, open `http://localhost:3000`.
+2. Click the blue chat button in the bottom-right corner.
+3. Paste an Anthropic API key (`sk-ant-...`) into the settings dialog. Get one at [console.anthropic.com](https://console.anthropic.com/). The key is stored in `localStorage` under `ud_anthropic_key`.
+4. Ask anything — "show only female moderators", "top 5 countries among admins", "open the card of Ava Taylor".
+
+To forget the key: click the gear icon in the chat header → "Forget current key", or run `localStorage.removeItem("ud_anthropic_key")` in the browser console.
+
+### Switching models or expanding tools
+
+- The model is hard-coded in `app/components/ChatWidget.tsx` (`const MODEL = "claude-sonnet-4-6"`).
+- Tools live in `app/lib/chatTools.ts`. Each tool has a JSON schema + a local executor that operates on the in-memory `users` array and the dashboard actions exposed through `DashboardCtx`. Adding a new tool is one schema entry + one switch case in `executeTool`.
+- The agent loop is in `app/lib/anthropic.ts` — up to 6 tool-use iterations per turn, then it returns the final assistant text.
+
+### Hosting with a real backend
+
+For a publicly shared deployment, do not ship the browser-direct configuration: anyone can read the key from `localStorage` and the dashboard CORS-allows the call. Instead:
+
+1. Remove `output: "export"` from `next.config.ts`.
+2. Add an `app/api/chat/route.ts` route handler that proxies to Anthropic with the key from `process.env.ANTHROPIC_API_KEY`.
+3. Change the fetch URL in `app/lib/anthropic.ts` from `https://api.anthropic.com/v1/messages` to `/api/chat`, drop the `x-api-key` and `anthropic-dangerous-direct-browser-access` headers.
+4. Deploy to Vercel / a Node host instead of GitHub Pages.

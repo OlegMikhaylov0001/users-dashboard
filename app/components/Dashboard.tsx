@@ -17,6 +17,8 @@ import { UserCard } from "./users/UserCard";
 import { UserRow } from "./users/UserRow";
 import { UserModal } from "./users/UserModal";
 import type { ViewMode } from "../hooks/useDashboard";
+import { DashboardCtx } from "./dashboard-ctx";
+import { ChatWidget } from "./ChatWidget";
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
@@ -70,6 +72,17 @@ export default function Dashboard({ users, departments, titles, countries, state
 
   return (
     <DarkCtx.Provider value={isDark}>
+      <DashboardCtx.Provider
+        value={{
+          users,
+          setFilter: db.setFilter,
+          applyPreset: db.applyPreset,
+          clear: db.clear,
+          onAgeChange: db.onAgeChange,
+          setSelected: db.setSelected,
+          getCurrentFilters: () => ({ ...db.filters, ageFilter: db.ageFilter }),
+        }}
+      >
       <div className="flex flex-col h-screen overflow-hidden bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100">
 
         {/* ── Topbar — h-14 (56px) so sidebar can use top-14 on mobile ── */}
@@ -309,7 +322,11 @@ export default function Dashboard({ users, departments, titles, countries, state
 
         {/* Modal */}
         {db.selected && <UserModal user={db.selected} onClose={() => db.setSelected(null)} />}
+
+        {/* Chat assistant */}
+        <ChatWidget />
       </div>
+      </DashboardCtx.Provider>
     </DarkCtx.Provider>
   );
 }
