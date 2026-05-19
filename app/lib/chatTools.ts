@@ -40,8 +40,8 @@ const QueryInputSchema = z
 
 const ApplyInputSchema = z
   .object({
-    role: z.enum(["admin", "moderator", "user", ""]).optional(),
-    gender: z.enum(["male", "female", ""]).optional(),
+    role: z.enum(["admin", "moderator", "user"]).optional(),
+    gender: z.enum(["male", "female"]).optional(),
     department: z.string().optional(),
     title: z.string().optional(),
     country: z.string().optional(),
@@ -117,12 +117,12 @@ export const ANTHROPIC_TOOLS = [
   {
     name: "apply_filters",
     description:
-      "Set filters on the dashboard UI (chips in the top bar update, list re-renders). Use when the user asks to 'show only X'. Empty/missing fields are left untouched unless clearOthers is true. Returns matched_count plus a diff describing what changed (used by the UI to show the user what was set).",
+      "Set filters on the dashboard UI (chips in the top bar update, list re-renders). Use when the user asks to 'show only X'. Omitted fields are left untouched. To clear filters first and apply only the new ones, set clearOthers:true. Returns matched_count plus a diff describing what changed (used by the UI to show the user what was set).",
     input_schema: {
       type: "object",
       properties: {
-        role: { type: "string", enum: ["admin", "moderator", "user", ""] },
-        gender: { type: "string", enum: ["male", "female", ""] },
+        role: { type: "string", enum: ["admin", "moderator", "user"] },
+        gender: { type: "string", enum: ["male", "female"] },
         department: { type: "string" },
         title: { type: "string" },
         country: { type: "string" },
