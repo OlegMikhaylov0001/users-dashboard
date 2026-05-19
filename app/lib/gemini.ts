@@ -47,6 +47,12 @@ function cleanSchemaForGemini(schema: unknown): unknown {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(schema as Record<string, unknown>)) {
     if (GEMINI_FORBIDDEN_KEYS.has(k)) continue;
+    // Gemini rejects empty strings inside enum arrays with a 400.
+    // Filter them out silently — model never needs "" as a valid choice.
+    if (k === "enum" && Array.isArray(v)) {
+      out[k] = v.filter((x) => x !== "" && x != null);
+      continue;
+    }
     out[k] = cleanSchemaForGemini(v);
   }
   return out;
