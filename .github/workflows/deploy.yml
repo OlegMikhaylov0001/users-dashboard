@@ -32,6 +32,9 @@ jobs:
           # Sets basePath to "/repo-name" automatically.
           # If this is a user/org page (username.github.io), change to an empty string.
           NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}
+          # Cloudflare Worker proxy URL for the keyless demo provider.
+          # When unset, the "Demo" provider is hidden from the UI.
+          NEXT_PUBLIC_DEMO_WORKER_URL: ${{ vars.NEXT_PUBLIC_DEMO_WORKER_URL }}
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
