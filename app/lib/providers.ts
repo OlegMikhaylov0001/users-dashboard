@@ -7,6 +7,22 @@ import {
 } from "./pricing";
 import type { RunChatParams, RunChatResult } from "./anthropic";
 
+// ── Default keys ─────────────────────────────────────────────────────────────
+// Paste a Google AI Studio key below to enable the chat for any visitor without
+// asking them to sign up. Leave empty to require every user to provide their own.
+//
+// SECURITY: the key is bundled into the public JS — anyone can scrape it from
+// the deployed site. Use a Gemini key on the **free tier only** (250 RPD,
+// 10 RPM), so abuse caps out at quota exhaustion rather than a bill. NEVER
+// put an Anthropic / OpenAI / paid key here.
+//
+// Get one: https://aistudio.google.com/apikey
+export const DEFAULT_GEMINI_KEY = "";
+
+// Same idea for Anthropic, but DO NOT use unless you understand the cost risk —
+// Claude has no free tier and any scraper can burn through your credit budget.
+export const DEFAULT_ANTHROPIC_KEY = "";
+
 export type ProviderId = "anthropic" | "google";
 
 export interface ProviderConfig {
@@ -54,7 +70,17 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
 
 export const PROVIDER_IDS: ProviderId[] = ["anthropic", "google"];
 export const PROVIDER_STORAGE_KEY = "ud_provider";
-export const DEFAULT_PROVIDER: ProviderId = "anthropic";
+
+// Map provider id → bundled fallback key (empty string if none)
+export const DEFAULT_KEYS: Record<ProviderId, string> = {
+  anthropic: DEFAULT_ANTHROPIC_KEY,
+  google: DEFAULT_GEMINI_KEY,
+};
+
+// Default-provider rule: if a bundled key exists, prefer Gemini (free tier) so
+// new visitors land on a working chat. Otherwise fall back to Anthropic so the
+// settings dialog points at the Claude flow first.
+export const DEFAULT_PROVIDER: ProviderId = DEFAULT_GEMINI_KEY ? "google" : "anthropic";
 
 export function isProviderId(v: unknown): v is ProviderId {
   return v === "anthropic" || v === "google";
