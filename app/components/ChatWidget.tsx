@@ -17,6 +17,8 @@ import {
 import type { Filters } from "../hooks/useDashboard";
 import { I } from "./icons";
 
+// ── types ────────────────────────────────────────────────────────────────────
+
 interface FiltersSnapshot {
   q: string;
   role: string;
@@ -33,9 +35,7 @@ interface ToolCallRecord {
   name: string;
   input: unknown;
   output?: unknown;
-  // For apply_filters / clear_filters — captured at execution time so Undo can revert.
   previousFilters?: FiltersSnapshot;
-  // For apply_filters — keys → from/to so we can render a diff chip.
   diff?: Record<string, { from: unknown; to: unknown }>;
   undone?: boolean;
 }
@@ -57,6 +57,8 @@ interface FilterSnapshotForPrompt {
   ageFilter: [number, number] | null;
 }
 
+// ── prompt + slash helpers ───────────────────────────────────────────────────
+
 function buildSystem(userCount: number, snapshot: FilterSnapshotForPrompt): string {
   const activeBits = Object.entries(snapshot).filter(([, v]) => v !== "" && v !== null);
   const active = activeBits.length
@@ -72,36 +74,30 @@ function buildSystem(userCount: number, snapshot: FilterSnapshotForPrompt): stri
   ].join(" ");
 }
 
-function summarizeToolInput(input: unknown): string {
-  if (!input || typeof input !== "object") return "";
-  const obj = input as Record<string, unknown>;
-  const parts: string[] = [];
-  for (const [k, v] of Object.entries(obj)) {
-    if (v === undefined || v === "" || v === null) continue;
-    if (typeof v === "object") parts.push(`${k}=${JSON.stringify(v)}`);
-    else parts.push(`${k}=${String(v)}`);
-  }
-  return parts.join(" · ");
+interface SuggestionEntry {
+  label: string;
+  icon: "stats" | "filter";
 }
 
-const SUGGESTIONS = [
-  "Avg age of engineering users in the US",
-  "Top 5 countries among moderators",
-  "Show only female HR users",
+const SUGGESTIONS: SuggestionEntry[] = [
+  { label: "Avg age of engineering users in the US", icon: "stats" },
+  { label: "Top 5 countries among moderators", icon: "stats" },
+  { label: "Show only female HR users", icon: "filter" },
 ];
 
 interface SlashCommand {
   name: string;
   args?: string;
   description: string;
+  icon: keyof typeof I;
 }
 
 const SLASH_COMMANDS: SlashCommand[] = [
-  { name: "help", description: "List available commands" },
-  { name: "clear", description: "Wipe chat history (local, no API call)" },
-  { name: "cost", description: "Show this session's token + $ usage" },
-  { name: "explain", description: "Summarise current filters and the visible users" },
-  { name: "compare", args: "<name1> and <name2>", description: "Compare two users by their key attributes" },
+  { name: "help", description: "List available commands", icon: "HelpCircle" },
+  { name: "clear", description: "Wipe chat history + cost meter", icon: "Trash" },
+  { name: "cost", description: "Show token + dollar breakdown", icon: "Coin" },
+  { name: "explain", description: "Explain current filter state", icon: "Sparkle" },
+  { name: "compare", args: "<name1> and <name2>", description: "Compare two users by their attributes", icon: "Stats" },
 ];
 
 function helpMessage(): string {
@@ -121,7 +117,6 @@ function costMessage(usage: ChatUsage, providerLabel: string, pricing: import(".
   ].join("\n");
 }
 
-/** Returns null if input is not a slash command. Otherwise: {handledLocally, expandedPrompt?}. */
 function parseSlash(text: string): { handledLocally: true; localText: string } | { handledLocally: false; prompt: string } | null {
   if (!text.startsWith("/")) return null;
   const trimmed = text.trim();
@@ -143,7 +138,7 @@ function parseSlash(text: string): { handledLocally: true; localText: string } |
     case "compare": {
       const parts = args.split(/\s+and\s+/i);
       if (parts.length !== 2) {
-        return { handledLocally: true, localText: 'Usage: /compare <name1> and <name2>' };
+        return { handledLocally: true, localText: "Usage: /compare <name1> and <name2>" };
       }
       return {
         handledLocally: false,
@@ -154,6 +149,136 @@ function parseSlash(text: string): { handledLocally: true; localText: string } |
       return { handledLocally: true, localText: `Unknown command: /${cmd}. Type /help for the list.` };
   }
 }
+
+// ── render helpers ───────────────────────────────────────────────────────────
+
+const TOOL_META: Record<string, { label: string; cls: "" | "write" | "danger"; iconKey: keyof typeof I }> = {
+  get_users_stats: { label: "GET_USERS_STATS", cls: "", iconKey: "Stats" },
+  query_users: { label: "QUERY_USERS", cls: "", iconKey: "Search" },
+  apply_filters: { label: "APPLY_FILTERS", cls: "write", iconKey: "Filter" },
+  clear_filters: { label: "CLEAR_FILTERS", cls: "danger", iconKey: "Trash" },
+  open_user: { label: "OPEN_USER", cls: "", iconKey: "User" },
+};
+
+function toolArgsSummary(input: unknown): React.ReactNode {
+  if (!input || typeof input !== "object") return null;
+  const entries = Object.entries(input as Record<string, unknown>).filter(
+    ([, v]) => v !== undefined && v !== "" && v !== null && !(typeof v === "object" && Object.keys(v as object).length === 0),
+  );
+  if (entries.length === 0) return null;
+  return (
+    <div className="tool-args">
+      {entries.map(([k, v], i) => (
+        <span key={k}>
+          {i > 0 && <span style={{ color: "var(--fg-muted)" }}>, </span>}
+          <span className="tool-arg-key">{k}:</span> <span className="tool-arg-val">{JSON.stringify(v)}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function statsResultPreview(out: Record<string, unknown>): React.ReactNode {
+  // Prefer groupBy top-N if present
+  if (out.groupBy && Array.isArray(out.top)) {
+    const top = out.top as Array<{ value: string; count: number }>;
+    return (
+      <div className="tool-list-preview">
+        {top.slice(0, 3).map((t) => (
+          <div key={t.value} className="tool-list-row">
+            <span className="avatar-sm" style={{ background: "var(--accent-soft)", borderColor: "transparent", color: "var(--accent-fg)" }}>•</span>
+            {t.value || "—"}
+            <span className="ml">{t.count}</span>
+          </div>
+        ))}
+        {top.length > 3 && <div className="tool-list-more">+ {top.length - 3} more</div>}
+      </div>
+    );
+  }
+  const total = typeof out.total === "number" ? out.total : null;
+  const avg = typeof out.avgAge === "number" ? out.avgAge : null;
+  const buckets = out.ageBuckets as Record<string, number> | undefined;
+  const bars = buckets ? Object.values(buckets) : [];
+  const max = bars.length ? Math.max(...bars, 1) : 1;
+  // Show avg age as the big number if available, otherwise total.
+  const big = avg !== null ? avg : total;
+  const label = avg !== null ? `avg age · ${total ?? "—"} users` : total !== null ? "users matched" : "stats";
+  if (big === null) return null;
+  return (
+    <div className="tool-result">
+      <div>
+        <div className="tool-result-num">{big}</div>
+        <div className="tool-result-label">{label}</div>
+      </div>
+      {bars.length > 0 && (
+        <div className="tr-mini">
+          {bars.map((b, i) => (
+            <i key={i} style={{ height: `${Math.max(3, Math.round((b / max) * 18))}px` }} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function queryResultPreview(out: Record<string, unknown>): React.ReactNode {
+  const users = out.users as Array<Record<string, unknown>> | undefined;
+  const total = typeof out.total_matched === "number" ? out.total_matched : 0;
+  if (!users || users.length === 0) {
+    return (
+      <div className="tool-result">
+        <div>
+          <div className="tool-result-num">{total}</div>
+          <div className="tool-result-label">users matched · none returned</div>
+        </div>
+      </div>
+    );
+  }
+  const head = users.slice(0, 3);
+  const rest = users.length - head.length;
+  const truncated = Boolean(out.truncated);
+  return (
+    <div className="tool-list-preview">
+      {head.map((u, i) => {
+        const first = String((u.firstName as string) ?? "").slice(0, 1);
+        const last = String((u.lastName as string) ?? "").slice(0, 1);
+        const name = `${u.firstName ?? ""} ${u.lastName ?? ""}`.trim() || (u.email as string) || `User #${u.id}`;
+        return (
+          <div key={i} className="tool-list-row">
+            <span className="avatar-sm">{(first + last).toUpperCase() || "U"}</span>
+            {name}
+            {typeof u.age === "number" && <span className="ml">{u.age}</span>}
+          </div>
+        );
+      })}
+      {rest > 0 && <div className="tool-list-more">+ {rest}{truncated ? ` of ${total}` : ""} more</div>}
+    </div>
+  );
+}
+
+function openUserResultPreview(out: Record<string, unknown>): React.ReactNode {
+  const opened = out.opened as { id: number; name: string } | undefined;
+  if (!opened) return null;
+  return (
+    <div className="tool-result">
+      <div>
+        <div className="tool-result-num" style={{ fontSize: 13, fontWeight: 600 }}>{opened.name}</div>
+        <div className="tool-result-label">opened · USR-{opened.id}</div>
+      </div>
+    </div>
+  );
+}
+
+function clearFiltersDiff(prev: FiltersSnapshot | undefined): Record<string, { from: unknown; to: unknown }> | undefined {
+  if (!prev) return undefined;
+  const out: Record<string, { from: unknown; to: unknown }> = {};
+  for (const [k, v] of Object.entries(prev)) {
+    if (v !== "" && v !== null && v !== undefined) out[k] = { from: v, to: null };
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+// ── component ────────────────────────────────────────────────────────────────
 
 export function ChatWidget() {
   const ctx = useContext(DashboardCtx);
@@ -166,23 +291,21 @@ export function ChatWidget() {
   const [apiKeys, setApiKeys] = useState<Record<ProviderId, string | null>>(() => {
     if (typeof window === "undefined") return { demo: null, anthropic: null, google: null };
     return {
-      demo: null, // demo provider doesn't accept a user key
+      demo: null,
       anthropic: window.localStorage.getItem(PROVIDERS.anthropic.apiKeyStorageKey),
       google: window.localStorage.getItem(PROVIDERS.google.apiKeyStorageKey),
     };
   });
-  // localStorage takes precedence over bundled default; default is the fallback.
-  // For the keyless demo provider, DEFAULT_KEYS["demo"] holds the Worker URL.
   const apiKey = apiKeys[provider] || DEFAULT_KEYS[provider] || null;
   const providerCfg = PROVIDERS[provider];
-  // "default" hint only makes sense for keyed providers; demo isn't really a "key".
   const usingDefaultKey =
     providerCfg.requiresKey && !apiKeys[provider] && !!DEFAULT_KEYS[provider];
   const [keyInput, setKeyInput] = useState("");
-  const [persistKey, setPersistKey] = useState(true);
+  const [keyVisible, setKeyVisible] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
+  const [inputFocused, setInputFocused] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [usage, setUsage] = useState<ChatUsage>(EMPTY_USAGE);
@@ -194,10 +317,6 @@ export function ChatWidget() {
   }, [turns, pending]);
 
   const apiMessages = useMemo<AnthropicMessage[]>(() => {
-    // Rebuild the full Anthropic message thread from turns for stateless calls.
-    // We only kept summarized chat turns in state, so we replay text + tool history.
-    // (For v1 we keep history simple: send back assistant text only — model already
-    // explained what it did. Tool-use round-trips happen within a single runChat call.)
     const msgs: AnthropicMessage[] = [];
     for (const t of turns) {
       if (t.role === "user" && t.text) msgs.push({ role: "user", content: t.text });
@@ -206,27 +325,36 @@ export function ChatWidget() {
     return msgs;
   }, [turns]);
 
+  // Slash autocomplete is shown when input starts with "/" and we haven't typed args yet.
+  const showSlashPopover = input.startsWith("/") && !input.includes(" ") && !pending;
+  const slashMatches = useMemo(
+    () => SLASH_COMMANDS.filter((c) => `/${c.name}`.startsWith(input.toLowerCase())),
+    [input],
+  );
+
   function saveKey() {
     const trimmed = keyInput.trim();
     if (!trimmed) return;
     setApiKeys((prev) => ({ ...prev, [provider]: trimmed }));
-    if (persistKey && typeof window !== "undefined") {
+    if (typeof window !== "undefined") {
       window.localStorage.setItem(providerCfg.apiKeyStorageKey, trimmed);
     }
     setKeyInput("");
-    setSettingsOpen(false);
+    setKeyVisible(false);
   }
 
-  function forgetKey() {
-    setApiKeys((prev) => ({ ...prev, [provider]: null }));
-    if (typeof window !== "undefined") window.localStorage.removeItem(providerCfg.apiKeyStorageKey);
-    setSettingsOpen(false);
+  function forgetKey(target: ProviderId = provider) {
+    setApiKeys((prev) => ({ ...prev, [target]: null }));
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(PROVIDERS[target].apiKeyStorageKey);
+    }
   }
 
   function switchProvider(next: ProviderId) {
     if (next === provider) return;
     setProvider(next);
-    setKeyInput(""); // avoid accidentally saving the wrong-provider key from the input draft
+    setKeyInput("");
+    setKeyVisible(false);
     setError(null);
     if (typeof window !== "undefined") window.localStorage.setItem(PROVIDER_STORAGE_KEY, next);
   }
@@ -263,7 +391,6 @@ export function ChatWidget() {
     if (!ctx || !rawText.trim() || pending) return;
     setError(null);
 
-    // Slash command handling — happens before any LLM call.
     const slash = parseSlash(rawText.trim());
     let promptText = rawText.trim();
     if (slash) {
@@ -332,17 +459,12 @@ export function ChatWidget() {
               const next = [...prev];
               const idx = stepIdx >= 0 ? stepIdx : next.length - 1;
               const cur = next[idx] ?? { role: "assistant", text: "", toolCalls: [] };
-              next[idx] = {
-                ...cur,
-                toolCalls: [...(cur.toolCalls ?? []), ...calls],
-              };
+              next[idx] = { ...cur, toolCalls: [...(cur.toolCalls ?? []), ...calls] };
               return next;
             });
           }
         },
         onToolResult: (name, _input, output) => {
-          // Patch the matching tool-call record with its output and any diff/previous_filters.
-          // Match by name + position: the latest call of this name without an output yet.
           setTurns((prev) => {
             const next = [...prev];
             const idx = stepIdx >= 0 ? stepIdx : next.length - 1;
@@ -393,385 +515,606 @@ export function ChatWidget() {
 
   if (!ctx) return null;
 
-  // Open the settings dialog automatically when the current provider needs a key
-  // and we don't have one (saved or default). Keyless demo provider skips this.
-  const needsKey = (providerCfg.requiresKey && !apiKey) || settingsOpen;
+  // For the keyed providers without a key (or default), force the key-setup view.
+  const needsKeySetup = providerCfg.requiresKey && !apiKey;
+  const showFlyout = settingsOpen;
+  const showSetup = !showFlyout && needsKeySetup;
+  const tokensTotal = totalTokens(usage);
+  const sessionCost = costUsd(usage, providerCfg.pricing);
+
+  const providerThumbClass: Record<ProviderId, string> = {
+    demo: "demo",
+    anthropic: "claude",
+    google: "gemini",
+  };
+  const providerThumbInitial: Record<ProviderId, string> = {
+    demo: "D",
+    anthropic: "C",
+    google: "G",
+  };
+
+  // Demo rate-limit detection (Cloudflare worker returns "Demo limit reached…")
+  const isDemoRateLimit = (error ?? "").toLowerCase().includes("demo limit");
 
   return (
     <>
-      {/* Floating action button — visible when chat closed */}
+      {/* ── FAB ── */}
       {!open && (
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          className="fixed bottom-4 right-4 z-40 w-12 h-12 rounded-full bg-[#185FA5] hover:bg-[#144d85] text-white shadow-2xl flex items-center justify-center transition-colors"
-          aria-label="Open chat assistant"
-        >
-          <svg className="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
-            <path d="M3 4h14v10H8l-3 3v-3H3z" />
-            <circle cx="7" cy="9" r="0.8" fill="currentColor" />
-            <circle cx="10" cy="9" r="0.8" fill="currentColor" />
-            <circle cx="13" cy="9" r="0.8" fill="currentColor" />
-          </svg>
+        <button type="button" className="fab" onClick={() => setOpen(true)} aria-label="Open chat assistant">
+          <span className="fab-pill">
+            <span>Ask AI</span>
+            <span className="kbd">⌘K</span>
+          </span>
+          <span className="fab-btn">
+            <I.Sparkle size={20} stroke={2} />
+            <span className="fab-dot" />
+          </span>
         </button>
       )}
 
-      {/* Chat panel */}
+      {/* ── Widget panel ── */}
       {open && (
-        <div className="fixed bottom-4 right-4 w-96 max-w-[calc(100vw-2rem)] h-[32rem] max-h-[calc(100vh-2rem)] bg-white dark:bg-zinc-900 rounded-2xl shadow-2xl border border-zinc-200 dark:border-zinc-800 flex flex-col z-40 overflow-hidden">
+        <div className="widget" role="dialog" aria-label="Ask about these users">
           {/* Header */}
-          <div className="flex items-center gap-2 px-4 h-12 border-b border-zinc-200 dark:border-zinc-800 shrink-0">
-            <div className="w-7 h-7 rounded-full bg-[#185FA5] text-white flex items-center justify-center text-[12px] font-semibold">AI</div>
-            <div className="flex-1 min-w-0">
-              <p className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-100 truncate">Ask about these users</p>
-              <p
-                className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate flex items-center gap-1"
-                title={`${ctx.users.length} users · ${providerCfg.defaultModel} (${providerCfg.shortLabel})`}
-              >
-                <span>{ctx.users.length} users</span>
-                <span>·</span>
+          <div className="w-header">
+            <div className="w-header-row">
+              <div className="w-avatar"><I.Sparkle size={14} stroke={2} /></div>
+              <div className="w-header-titles">
+                <div className="w-title">Ask about these users</div>
+                <div className="w-sub">{ctx.users.length} users · ready to query</div>
+              </div>
+              <div className="w-header-actions">
                 <button
                   type="button"
-                  onClick={() => setSettingsOpen(true)}
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 -my-0.5 rounded text-[11px] font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors"
-                  title="Switch provider"
+                  className="w-iconbtn"
+                  onClick={() => setSettingsOpen((v) => !v)}
+                  aria-label="Settings"
+                  title="Settings"
                 >
-                  {providerCfg.shortLabel}
-                  <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                    <path d="M4 6l4 4 4-4" />
-                  </svg>
+                  <I.Settings size={14} />
                 </button>
-                {totalTokens(usage) > 0 && (
-                  <span title={`Session tokens / cost (${providerCfg.pricingNote})`}>
-                    · {formatTokens(totalTokens(usage))} tok · {formatCost(costUsd(usage, providerCfg.pricing))}
-                  </span>
-                )}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setSettingsOpen((v) => !v)}
-              className="w-7 h-7 flex items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
-              aria-label="Settings"
-              title="Settings"
-            >
-              <I.Settings size={14} />
-            </button>
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              className="w-7 h-7 flex items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
-              aria-label="Close chat"
-            >
-              <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path d="M3 3l10 10M13 3L3 13" />
-              </svg>
-            </button>
-          </div>
-
-          {needsKey ? (
-            <div className="flex-1 overflow-y-auto px-4 py-4 text-[13px] text-zinc-700 dark:text-zinc-300">
-              <p className="font-semibold mb-2">Provider</p>
-              <div className="flex flex-col gap-1 mb-4">
-                {PROVIDER_IDS.map((id) => {
-                  const p = PROVIDERS[id];
-                  const savedKey = Boolean(apiKeys[id]);
-                  const defaultKey = Boolean(DEFAULT_KEYS[id]);
-                  let badge: { text: string; color: string };
-                  if (!p.requiresKey) badge = { text: "free demo", color: "text-emerald-600 dark:text-emerald-400" };
-                  else if (savedKey) badge = { text: "your key", color: "text-green-600 dark:text-green-400" };
-                  else if (defaultKey) badge = { text: "default", color: "text-[#6F50D9] dark:text-[#9b85e8]" };
-                  else badge = { text: "no key", color: "text-zinc-400" };
-                  return (
-                    <label
-                      key={id}
-                      className={`flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer border ${
-                        provider === id
-                          ? "border-[#6F50D9] bg-[#6F50D9]/5"
-                          : "border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800"
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="provider"
-                        checked={provider === id}
-                        onChange={() => switchProvider(id)}
-                        className="cursor-pointer"
-                      />
-                      <span className="flex-1 text-[13px]">{p.label}</span>
-                      <span className={`text-[10px] uppercase tracking-wider font-semibold ${badge.color}`}>
-                        {badge.text}
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-
-              {providerCfg.requiresKey ? (
-                <>
-                  <p className="font-semibold mb-1">{providerCfg.shortLabel} API key</p>
-                  <p className="text-[12px] text-zinc-500 dark:text-zinc-400 mb-3">
-                    {providerCfg.pricingNote} The request goes directly from your browser to{" "}
-                    <a className="underline" href={providerCfg.apiKeyConsoleUrl} target="_blank" rel="noreferrer">
-                      {providerCfg.apiKeyConsoleLabel}
-                    </a>
-                    .
-                  </p>
-                </>
-              ) : (
-                <>
-                  <p className="font-semibold mb-1">Free demo — no key needed</p>
-                  <p className="text-[12px] text-zinc-500 dark:text-zinc-400 mb-3">
-                    {providerCfg.pricingNote} Switch to Claude or Gemini if you need a higher quota or specific model.
-                  </p>
-                </>
-              )}
-              {usingDefaultKey && (
-                <p className="text-[12px] text-[#6F50D9] dark:text-[#9b85e8] mb-3 bg-[#6F50D9]/5 border border-[#6F50D9]/20 rounded-lg px-2.5 py-1.5">
-                  Currently using the bundled default key. Paste your own below to override (saved in localStorage, takes precedence).
-                </p>
-              )}
-              {providerCfg.requiresKey && (
-                <input
-                  type="password"
-                  value={keyInput}
-                  onChange={(e) => setKeyInput(e.target.value)}
-                  placeholder={providerCfg.apiKeyPlaceholder}
-                  className="w-full h-9 px-3 border border-zinc-200 dark:border-zinc-700 rounded-lg bg-zinc-50 dark:bg-zinc-800 text-[13px] placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-[#185FA5]/30 focus:border-[#185FA5]"
-                />
-              )}
-              {providerCfg.requiresKey && (
-                <label className="flex items-center gap-2 mt-2 text-[12px] text-zinc-500 dark:text-zinc-400">
-                  <input type="checkbox" checked={persistKey} onChange={(e) => setPersistKey(e.target.checked)} />
-                  Remember in this browser (localStorage)
-                </label>
-              )}
-              <div className="flex gap-2 mt-3">
-                {providerCfg.requiresKey && (
-                  <button
-                    type="button"
-                    onClick={saveKey}
-                    disabled={!keyInput.trim()}
-                    className="px-3 py-1.5 rounded-lg bg-[#185FA5] hover:bg-[#144d85] disabled:opacity-50 text-white text-[13px] font-medium transition-colors"
-                  >
-                    Save
-                  </button>
-                )}
-                {providerCfg.requiresKey && apiKeys[provider] && (
-                  <button
-                    type="button"
-                    onClick={forgetKey}
-                    className="px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-[13px] text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors"
-                  >
-                    Forget current key
-                  </button>
-                )}
-                {apiKey && settingsOpen && (
-                  <button
-                    type="button"
-                    onClick={() => setSettingsOpen(false)}
-                    className="ml-auto px-3 py-1.5 rounded-lg text-[13px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                )}
-              </div>
-              {apiKey && (
                 <button
                   type="button"
-                  onClick={resetChat}
-                  className="mt-4 text-[12px] text-zinc-400 hover:text-red-500 transition-colors"
+                  className="w-iconbtn"
+                  onClick={() => setOpen(false)}
+                  aria-label="Close chat"
+                  title="Close"
                 >
-                  Clear chat history
+                  <I.X size={14} />
                 </button>
-              )}
-            </div>
-          ) : (
-            <>
-              <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-                {turns.length === 0 && (
-                  <div className="text-[12px] text-zinc-400 dark:text-zinc-500">
-                    Ask anything about the {ctx.users.length} users — counts, distributions, filters. Type <span className="font-mono">/help</span> for commands.
-                  </div>
-                )}
-                {turns.map((t, i) => (
-                  t.role === "system" ? (
-                    <div key={i} className="text-[12px] text-zinc-500 dark:text-zinc-400 border border-dashed border-zinc-200 dark:border-zinc-700 rounded-lg px-3 py-2 whitespace-pre-wrap font-mono">
-                      {t.text}
-                    </div>
-                  ) : (
-                    <div key={i} className="space-y-1.5">
-                      <div className={t.role === "user" ? "flex justify-end" : "flex justify-start"}>
-                        <div
-                          className={
-                            t.role === "user"
-                              ? "max-w-[85%] bg-[#185FA5] text-white px-3 py-2 rounded-2xl rounded-br-sm text-[13px] whitespace-pre-wrap"
-                              : "max-w-[85%] bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-100 px-3 py-2 rounded-2xl rounded-bl-sm text-[13px] whitespace-pre-wrap"
-                          }
-                        >
-                          {t.toolCalls && t.toolCalls.length > 0 && (
-                            <div className="mb-1.5 flex flex-wrap gap-1">
-                              {t.toolCalls.map((c, j) => (
-                                <span
-                                  key={j}
-                                  className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-semibold bg-white/60 dark:bg-zinc-900/60 text-zinc-600 dark:text-zinc-300 px-1.5 py-0.5 rounded"
-                                  title={summarizeToolInput(c.input)}
-                                >
-                                  <svg className="w-2.5 h-2.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8">
-                                    <path d="M6 3l4 5-4 5" />
-                                  </svg>
-                                  {c.name}
-                                </span>
-                              ))}
-                            </div>
-                          )}
-                          {t.text}
-                        </div>
-                      </div>
-                      {/* Diff card with Undo for filter-changing tools */}
-                      {t.toolCalls?.map((c, j) =>
-                        (c.name === "apply_filters" || c.name === "clear_filters") && c.previousFilters ? (
-                          <div
-                            key={`diff-${j}`}
-                            className="ml-2 text-[11px] bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700 rounded-lg px-2.5 py-1.5 flex items-start gap-2"
-                          >
-                            <div className="flex-1 min-w-0">
-                              <div className="font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider text-[10px]">
-                                {c.name === "clear_filters" ? "filters cleared" : "filters changed"}
-                              </div>
-                              <div className="mt-0.5 flex flex-wrap gap-1">
-                                {c.name === "apply_filters" && c.diff
-                                  ? Object.entries(c.diff).map(([k, v]) => (
-                                      <span key={k} className="font-mono text-zinc-600 dark:text-zinc-300">
-                                        {k}: <span className="line-through text-zinc-400">{String(v.from || "—")}</span>{" "}
-                                        →{" "}
-                                        <span className="text-green-600 dark:text-green-400">{String(v.to || "—")}</span>
-                                      </span>
-                                    ))
-                                  : (
-                                      <span className="font-mono text-zinc-500 dark:text-zinc-400">all filters reset</span>
-                                    )}
-                              </div>
-                            </div>
-                            <button
-                              type="button"
-                              disabled={c.undone}
-                              onClick={() => restoreFilters(c.previousFilters!, i, j)}
-                              className="text-[11px] px-2 py-0.5 rounded border border-zinc-300 dark:border-zinc-600 text-zinc-600 dark:text-zinc-300 hover:bg-white dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
-                            >
-                              {c.undone ? "Undone" : "Undo"}
-                            </button>
-                          </div>
-                        ) : null,
-                      )}
-                    </div>
-                  )
-                ))}
-                {pending && (
-                  <div className="flex justify-start">
-                    <div className="bg-zinc-100 dark:bg-zinc-800 text-zinc-500 px-3 py-2 rounded-2xl rounded-bl-sm text-[13px]">
-                      <span className="inline-flex gap-0.5">
-                        <span className="animate-pulse">·</span>
-                        <span className="animate-pulse" style={{ animationDelay: "150ms" }}>·</span>
-                        <span className="animate-pulse" style={{ animationDelay: "300ms" }}>·</span>
-                      </span>
-                    </div>
-                  </div>
-                )}
-                {error && (() => {
-                  const isDemoLimit = error.toLowerCase().includes("demo limit");
-                  return (
-                    <div className={
-                      isDemoLimit
-                        ? "bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200 border border-amber-200 dark:border-amber-900 rounded-lg px-3 py-2 text-[12px] space-y-2"
-                        : "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900 rounded-lg px-3 py-2 text-[12px]"
-                    }>
-                      <div>{error}</div>
-                      {isDemoLimit && (
-                        <div className="flex gap-1.5 flex-wrap">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setError(null);
-                              setSettingsOpen(true);
-                              switchProvider("anthropic");
-                            }}
-                            className="px-2 py-0.5 rounded border border-amber-300 dark:border-amber-800 text-[11px] font-medium hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors"
-                          >
-                            Use my Claude key
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setError(null);
-                              setSettingsOpen(true);
-                              switchProvider("google");
-                            }}
-                            className="px-2 py-0.5 rounded border border-amber-300 dark:border-amber-800 text-[11px] font-medium hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors"
-                          >
-                            Use my Gemini key
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
               </div>
-
-              {turns.length === 0 && (
-                <div className="flex flex-wrap gap-1.5 px-4 pb-2">
-                  {SUGGESTIONS.map((s) => (
-                    <button
-                      key={s}
-                      type="button"
-                      onClick={() => void sendMessage(s)}
-                      className="text-[11px] px-2 py-1 rounded-full border border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors"
-                    >
-                      {s}
-                    </button>
-                  ))}
-                  <button
-                    type="button"
-                    onClick={() => void sendMessage("/help")}
-                    className="text-[11px] px-2 py-1 rounded-full border border-dashed border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors font-mono"
-                  >
-                    /help
-                  </button>
+            </div>
+            <div className="w-meta">
+              <button type="button" className="w-provider-chip" onClick={() => setSettingsOpen(true)} title="Switch provider">
+                <span className={`pl ${providerThumbClass[provider]}`}>{providerThumbInitial[provider]}</span>
+                {providerCfg.shortLabel}
+                <I.ChevDown size={11} />
+              </button>
+              {tokensTotal > 0 && (
+                <div className="w-cost" title={`${providerCfg.shortLabel} · ${providerCfg.defaultModel}`}>
+                  <span><b>{formatTokens(tokensTotal)}</b> tok</span>
+                  <span className="vsep" />
+                  <span><b>{formatCost(sessionCost)}</b></span>
                 </div>
               )}
+            </div>
+          </div>
 
-              <form onSubmit={onSubmit} className="border-t border-zinc-200 dark:border-zinc-800 px-3 py-2.5 flex items-end gap-2 shrink-0">
-                <textarea
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      void sendMessage(input);
-                    }
-                  }}
-                  rows={1}
-                  placeholder="Ask about these users…"
-                  className="flex-1 resize-none max-h-32 px-3 py-2 border border-zinc-200 dark:border-zinc-700 rounded-lg bg-zinc-50 dark:bg-zinc-800 text-[13px] placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-[#185FA5]/30 focus:border-[#185FA5]"
-                  disabled={pending}
-                />
-                {pending ? (
+          {/* Settings flyout */}
+          {showFlyout && (
+            <div className="flyout">
+              <div className="flyout-header">
+                <button type="button" className="flyout-back" onClick={() => setSettingsOpen(false)} aria-label="Back">
+                  <I.ArrowLeft size={14} />
+                </button>
+                <div className="flyout-title">Settings</div>
+                <div style={{ marginLeft: "auto" }}>
+                  <button type="button" className="w-iconbtn" onClick={() => { setSettingsOpen(false); setOpen(false); }} aria-label="Close">
+                    <I.X size={14} />
+                  </button>
+                </div>
+              </div>
+              <div className="flyout-body">
+                {/* Provider thumbnail grid */}
+                <div>
+                  <div className="section-label">Provider</div>
+                  <div className="prov-grid">
+                    {PROVIDER_IDS.map((id) => {
+                      const p = PROVIDERS[id];
+                      const savedKey = Boolean(apiKeys[id]);
+                      const defaultKey = Boolean(DEFAULT_KEYS[id]);
+                      let badge: { text: string; cls: string } | null;
+                      if (!p.requiresKey) badge = { text: "free demo", cls: "emerald" };
+                      else if (savedKey) badge = { text: "your key", cls: "green" };
+                      else if (defaultKey) badge = { text: "default", cls: "indigo" };
+                      else badge = { text: "no key", cls: "gray" };
+                      const isActive = provider === id;
+                      return (
+                        <button
+                          key={id}
+                          type="button"
+                          className={`prov-card ${isActive ? "selected" : ""}`}
+                          onClick={() => switchProvider(id)}
+                        >
+                          <div className={`prov-logo ${providerThumbClass[id]}`}>{providerThumbInitial[id]}</div>
+                          <div className="prov-card-name">{p.shortLabel}</div>
+                          <div className="prov-card-meta">{p.defaultModel}</div>
+                          {badge && <span className={`badge ${badge.cls}`}>{badge.text}</span>}
+                          {isActive && (
+                            <span className="prov-card-check"><I.Check size={10} stroke={3} /></span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* API keys section */}
+                <div>
+                  <div className="section-label">API keys</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {PROVIDER_IDS.filter((id) => PROVIDERS[id].requiresKey).map((id) => {
+                      const p = PROVIDERS[id];
+                      const saved = apiKeys[id];
+                      const last4 = saved ? saved.slice(-4) : null;
+                      if (saved) {
+                        return (
+                          <div key={id} className="key-saved">
+                            <span
+                              className={`prov-logo ${providerThumbClass[id]}`}
+                              style={{ width: 20, height: 20, fontSize: 9, borderRadius: 5 }}
+                            >
+                              {providerThumbInitial[id]}
+                            </span>
+                            <span style={{ flex: 1 }}>
+                              {p.shortLabel} key saved · <code>•••{last4}</code>
+                            </span>
+                            <button
+                              type="button"
+                              className="btn-ghost-sm"
+                              style={{ height: 24, padding: "0 8px" }}
+                              onClick={() => forgetKey(id)}
+                            >
+                              Forget
+                            </button>
+                          </div>
+                        );
+                      }
+                      // No saved key — inline key-block for entry. Only show input for the active provider.
+                      const isActive = provider === id;
+                      const usingDefault = !!DEFAULT_KEYS[id];
+                      return (
+                        <div key={id} className="key-block">
+                          <div className="key-block-head">
+                            <span
+                              className={`prov-logo ${providerThumbClass[id]}`}
+                              style={{ width: 20, height: 20, fontSize: 9, borderRadius: 5 }}
+                            >
+                              {providerThumbInitial[id]}
+                            </span>
+                            <span className="key-block-title">{p.shortLabel} key</span>
+                            <span className={`badge ${usingDefault ? "indigo" : "gray"}`} style={{ marginLeft: "auto" }}>
+                              {usingDefault ? "default" : "no key"}
+                            </span>
+                          </div>
+                          {isActive && (
+                            <>
+                              <div className="key-input-row">
+                                <input
+                                  type={keyVisible ? "text" : "password"}
+                                  value={keyInput}
+                                  onChange={(e) => setKeyInput(e.target.value)}
+                                  placeholder={p.apiKeyPlaceholder}
+                                />
+                                <button
+                                  type="button"
+                                  className="key-eye"
+                                  onClick={() => setKeyVisible((v) => !v)}
+                                  title={keyVisible ? "Hide" : "Show"}
+                                >
+                                  {keyVisible ? <I.EyeOff size={13} /> : <I.Eye size={13} />}
+                                </button>
+                              </div>
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                                <a
+                                  className="console-link"
+                                  href={p.apiKeyConsoleUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  {p.apiKeyConsoleLabel} <I.ArrowRight size={10} />
+                                </a>
+                                <button
+                                  type="button"
+                                  className="btn-primary-sm"
+                                  onClick={saveKey}
+                                  disabled={!keyInput.trim()}
+                                >
+                                  Save key
+                                </button>
+                              </div>
+                            </>
+                          )}
+                          {!isActive && (
+                            <button
+                              type="button"
+                              className="btn-ghost-sm"
+                              onClick={() => switchProvider(id)}
+                              style={{ alignSelf: "flex-start" }}
+                            >
+                              Switch & paste key
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Session actions */}
+                <div>
+                  <div className="section-label">Session</div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      type="button"
+                      className="btn-ghost-sm"
+                      style={{ flex: 1, justifyContent: "center" }}
+                      onClick={() => { resetChat(); setSettingsOpen(false); }}
+                    >
+                      <I.Trash size={11} /> Clear chat
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost-sm"
+                      style={{ flex: 1, justifyContent: "center" }}
+                      onClick={() => setUsage(EMPTY_USAGE)}
+                    >
+                      <I.Refresh size={11} /> Reset cost meter
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Provider-key setup hero (when not in settings) */}
+          {showSetup && !showFlyout && (
+            <div className="w-body" style={{ paddingTop: 4 }}>
+              <div className="setup-hero">
+                <div className={`prov-logo ${providerThumbClass[provider]}`}>{providerThumbInitial[provider]}</div>
+                <div>
+                  <div className="setup-hero-title">Bring your own {providerCfg.shortLabel} key</div>
+                  <div className="setup-hero-sub">
+                    Your key lives in this browser&apos;s localStorage and is sent only to {providerCfg.apiKeyConsoleLabel}. Paste a key to continue.
+                  </div>
+                </div>
+              </div>
+              <div className="key-block">
+                <div className="key-block-head">
+                  <span className="key-block-title">{providerCfg.shortLabel} API key</span>
+                  <span className="badge gray" style={{ marginLeft: "auto" }}>no key</span>
+                </div>
+                {usingDefaultKey && (
+                  <div style={{ fontSize: 11, color: "var(--accent-fg)", padding: "0 2px" }}>
+                    A bundled default key is active. Paste your own below to override.
+                  </div>
+                )}
+                <div className="key-input-row">
+                  <input
+                    type={keyVisible ? "text" : "password"}
+                    value={keyInput}
+                    onChange={(e) => setKeyInput(e.target.value)}
+                    placeholder={providerCfg.apiKeyPlaceholder}
+                  />
                   <button
                     type="button"
-                    onClick={cancel}
-                    className="px-3 h-9 rounded-lg border border-zinc-200 dark:border-zinc-700 text-[13px] text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors"
+                    className="key-eye"
+                    onClick={() => setKeyVisible((v) => !v)}
                   >
-                    Stop
+                    {keyVisible ? <I.EyeOff size={13} /> : <I.Eye size={13} />}
                   </button>
-                ) : (
-                  <button
-                    type="submit"
-                    disabled={!input.trim()}
-                    className="px-3 h-9 rounded-lg bg-[#185FA5] hover:bg-[#144d85] disabled:opacity-50 text-white text-[13px] font-medium transition-colors"
+                </div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <a
+                    className="console-link"
+                    href={providerCfg.apiKeyConsoleUrl}
+                    target="_blank"
+                    rel="noreferrer"
                   >
-                    Send
-                  </button>
+                    {providerCfg.apiKeyConsoleLabel} <I.ArrowRight size={10} />
+                  </a>
+                  <div className="key-actions">
+                    {DEFAULT_KEYS.demo && (
+                      <button type="button" className="btn-ghost-sm" onClick={() => switchProvider("demo")}>
+                        Use Demo instead
+                      </button>
+                    )}
+                    <button type="button" className="btn-primary-sm" onClick={saveKey} disabled={!keyInput.trim()}>
+                      Save &amp; continue
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.5, padding: "0 2px" }}>
+                Switch providers anytime from the chip in the header above.
+                {DEFAULT_KEYS.demo && (
+                  <> The <b style={{ color: "var(--accent-fg)" }}>Demo</b> provider is free and requires no setup.</>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* Main conversation body (only when settings closed + key OK) */}
+          {!showFlyout && !showSetup && (
+            <>
+              <div ref={scrollRef} className="w-body">
+                {turns.length === 0 ? (
+                  <div className="w-empty">
+                    <div className="w-empty-pitch">
+                      <div className="w-empty-headline">Ask anything about the {ctx.users.length} users.</div>
+                      <div className="w-empty-sub">
+                        I can crunch counts, distributions, and top-N — or just drive the dashboard. Try a chip below, or type <code>/help</code> for commands.
+                      </div>
+                    </div>
+                    <div style={{ flex: 1 }} />
+                    <div>
+                      <div className="w-suggest-label">Try one of these</div>
+                      <div className="w-suggest-list">
+                        {SUGGESTIONS.map((s) => (
+                          <button key={s.label} type="button" className="w-suggest" onClick={() => void sendMessage(s.label)}>
+                            <span className="w-suggest-icon">
+                              {s.icon === "stats" ? <I.Stats size={11} /> : <I.Filter size={11} />}
+                            </span>
+                            <span className="w-suggest-text">{s.label}</span>
+                            <I.ArrowRight size={12} className="w-suggest-arrow" />
+                          </button>
+                        ))}
+                        <button type="button" className="w-suggest slash" onClick={() => void sendMessage("/help")}>
+                          <span className="w-suggest-icon"><I.Slash size={11} /></span>
+                          <span className="w-suggest-text">/help</span>
+                          <I.ArrowRight size={12} className="w-suggest-arrow" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="w-kbdhints">
+                      <span><span className="kbd">⌘K</span>open</span>
+                      <span><span className="kbd">/</span>slash command</span>
+                      <span><span className="kbd">Esc</span>close</span>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    {turns.map((t, i) => {
+                      if (t.role === "user") {
+                        return (
+                          <div key={i} className="msg user">
+                            <div className="bubble user">{t.text}</div>
+                          </div>
+                        );
+                      }
+                      if (t.role === "system") {
+                        return (
+                          <div key={i} className="msg system">
+                            <div className="bubble system">{t.text}</div>
+                          </div>
+                        );
+                      }
+                      // assistant — may have toolCalls, text, or both
+                      return (
+                        <div key={i} className="msg assistant">
+                          {t.toolCalls && t.toolCalls.length > 0 && (
+                            <div className="tool-calls">
+                              {t.toolCalls.map((c, j) => {
+                                const meta = TOOL_META[c.name];
+                                if (!meta) return null;
+                                const out = (c.output as Record<string, unknown> | undefined) ?? undefined;
+                                const hasError = Boolean(out?.error);
+                                const stillRunning = c.output === undefined;
+                                const IconComp = I[meta.iconKey];
+                                let preview: React.ReactNode = null;
+                                if (out && !hasError) {
+                                  if (c.name === "get_users_stats") preview = statsResultPreview(out);
+                                  else if (c.name === "query_users") preview = queryResultPreview(out);
+                                  else if (c.name === "open_user") preview = openUserResultPreview(out);
+                                }
+                                const argsNode = toolArgsSummary(c.input);
+                                const showBody = Boolean(preview || argsNode);
+                                return (
+                                  <div key={j}>
+                                    <div className="tool-card">
+                                      <div className={`tool-card-head ${showBody ? "" : "nodivider"}`}>
+                                        <span className={`tool-glyph ${meta.cls}`}><IconComp size={11} /></span>
+                                        <span className="tool-name">{meta.label}</span>
+                                        <span className={`tool-status ${stillRunning ? "running" : hasError ? "error" : ""}`}>
+                                          {stillRunning ? (
+                                            <><span className="tick" /> running…</>
+                                          ) : hasError ? (
+                                            <><span className="tick">!</span> error</>
+                                          ) : (
+                                            <><span className="tick"><I.Check size={7} stroke={3} /></span> done</>
+                                          )}
+                                        </span>
+                                      </div>
+                                      {argsNode}
+                                      {preview}
+                                    </div>
+                                    {/* Diff card under apply/clear filter tool calls */}
+                                    {(c.name === "apply_filters" || c.name === "clear_filters") && (() => {
+                                      const diff = c.name === "apply_filters"
+                                        ? c.diff
+                                        : clearFiltersDiff(c.previousFilters);
+                                      if (!diff || Object.keys(diff).length === 0) return null;
+                                      const matched = c.name === "apply_filters"
+                                        ? (out?.matched_count as number | undefined)
+                                        : (out?.total_users as number | undefined);
+                                      const subBits: string[] = [];
+                                      subBits.push(`${Object.keys(diff).length} keys ${c.name === "apply_filters" ? "updated" : "reset"}`);
+                                      if (typeof matched === "number") subBits.push(`${matched} users now visible`);
+                                      return (
+                                        <div className="diff-card" style={{ marginTop: 6 }}>
+                                          <div className="diff-head">
+                                            <span className={`diff-head-icon ${c.name === "clear_filters" ? "danger" : ""}`}>
+                                              {c.name === "clear_filters" ? <I.Trash size={12} /> : <I.Filter size={12} />}
+                                            </span>
+                                            <div>
+                                              <div className="diff-head-title">
+                                                {c.name === "clear_filters" ? "All filters cleared" : "Dashboard filters changed"}
+                                              </div>
+                                              <div className="diff-head-sub">{subBits.join(" · ")}</div>
+                                            </div>
+                                            <button
+                                              type="button"
+                                              className={`diff-undo ${c.undone ? "done" : ""}`}
+                                              disabled={c.undone}
+                                              onClick={() => c.previousFilters && restoreFilters(c.previousFilters, i, j)}
+                                            >
+                                              {c.undone ? (
+                                                <><I.Check size={11} stroke={2.5} /> Undone</>
+                                              ) : (
+                                                <><I.Undo size={11} /> Undo</>
+                                              )}
+                                            </button>
+                                          </div>
+                                          <div className="diff-timeline">
+                                            {Object.entries(diff).map(([key, v]) => (
+                                              <div key={key} className="diff-row">
+                                                <div className="diff-row-key">{key}</div>
+                                                <div className="diff-row-vals">
+                                                  <span className={`diff-pill ${v.from == null || v.from === "" ? "empty" : ""}`}>
+                                                    {v.from == null || v.from === "" ? "unset" : String(v.from)}
+                                                  </span>
+                                                  <span className="diff-arrow">→</span>
+                                                  <span className={`diff-pill ${v.to == null || v.to === "" ? "empty" : "new"}`}>
+                                                    {v.to == null || v.to === "" ? "unset" : String(v.to)}
+                                                  </span>
+                                                </div>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      );
+                                    })()}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                          {t.text && <div className="bubble assistant" style={{ marginTop: t.toolCalls?.length ? 6 : 0 }}>{t.text}</div>}
+                        </div>
+                      );
+                    })}
+                    {pending && <div className="pending-bubble"><i /><i /><i /></div>}
+                  </>
+                )}
+
+                {/* Error banner */}
+                {error && (
+                  <div className={`banner ${isDemoRateLimit ? "amber" : "red"}`}>
+                    <span className="banner-icon"><I.Warn size={11} /></span>
+                    <div className="banner-body">
+                      <div className="banner-title">
+                        {isDemoRateLimit ? "Demo provider rate-limit hit" : "Request failed"}
+                      </div>
+                      <div className="banner-msg">{error}</div>
+                      <div className="banner-actions">
+                        {isDemoRateLimit ? (
+                          <>
+                            <button
+                              type="button"
+                              className="banner-btn primary"
+                              onClick={() => { setError(null); setSettingsOpen(true); switchProvider("anthropic"); }}
+                            >
+                              <span className="pl claude" style={{ width: 12, height: 12, fontSize: 7, borderRadius: 3 }}>C</span>
+                              Use my Claude key
+                            </button>
+                            <button
+                              type="button"
+                              className="banner-btn"
+                              onClick={() => { setError(null); setSettingsOpen(true); switchProvider("google"); }}
+                            >
+                              <span className="pl gemini" style={{ width: 12, height: 12, fontSize: 7, borderRadius: 3 }}>G</span>
+                              Use my Gemini key
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button type="button" className="banner-btn primary" onClick={() => setError(null)}>
+                              <I.Refresh size={11} /> Dismiss
+                            </button>
+                            {DEFAULT_KEYS.demo && (
+                              <button type="button" className="banner-btn" onClick={() => { setError(null); switchProvider("demo"); }}>
+                                Switch to Demo
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Input area */}
+              <form onSubmit={onSubmit} className="w-input-wrap">
+                {showSlashPopover && slashMatches.length > 0 && (
+                  <div className="slash-popover">
+                    {slashMatches.map((c, i) => (
+                      <button
+                        key={c.name}
+                        type="button"
+                        className={`slash-item ${i === 0 ? "active" : ""}`}
+                        onMouseDown={(e) => {
+                          // Prevent textarea from losing focus before click handler runs
+                          e.preventDefault();
+                        }}
+                        onClick={() => {
+                          // Auto-fill the command + space; user types args if needed
+                          const next = c.args ? `/${c.name} ` : `/${c.name}`;
+                          setInput(next);
+                          if (!c.args) {
+                            // For arg-less commands, send immediately
+                            void sendMessage(next);
+                          }
+                        }}
+                      >
+                        <span className="sl-icon">{(() => { const Ic = I[c.icon]; return <Ic size={12} />; })()}</span>
+                        <span className="sl-name">/{c.name}</span>
+                        <span className="sl-desc">{c.description}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className={`w-input-card ${inputFocused ? "focus" : ""}`}>
+                  <textarea
+                    className="w-textarea"
+                    value={input}
+                    placeholder="Ask about these users…"
+                    onChange={(e) => setInput(e.target.value)}
+                    onFocus={() => setInputFocused(true)}
+                    onBlur={() => setInputFocused(false)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        void sendMessage(input);
+                      }
+                    }}
+                    rows={1}
+                    disabled={pending}
+                  />
+                  {pending ? (
+                    <button type="button" className="w-send stop" onClick={cancel}>
+                      <I.Stop size={11} /> Stop
+                    </button>
+                  ) : (
+                    <button type="submit" className={`w-send ${input.trim() ? "" : "dim"}`} disabled={!input.trim()}>
+                      <I.Send size={12} />
+                    </button>
+                  )}
+                </div>
+                <div className="w-input-foot">
+                  <span>Enter to send · Shift+Enter for newline</span>
+                  <span><span className="kbd">/</span> slash</span>
+                </div>
               </form>
             </>
           )}
