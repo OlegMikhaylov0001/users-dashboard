@@ -72,7 +72,7 @@ A floating action button in the bottom-right corner opens a chat panel ("Ask abo
 
 | Provider | Default model | Pricing | When to use |
 |---|---|---|---|
-| **Demo** (when configured) | `gemini-2.0-flash:free` via OpenRouter | Free — shared proxy, ~10 req/min, 50/day per IP | Visitors who don't want to provision a key. Default when set up. |
+| **Demo** (when configured) | `llama-3.3-70b:free` via OpenRouter | Free — shared proxy, ~10 req/min, 50/day per IP | Visitors who don't want to provision a key. Default when set up. |
 | Anthropic | `claude-sonnet-4-6` | Paid — your key, your bill | Production-quality answers, complex multi-step reasoning |
 | Google | `gemini-2.5-flash` | Free tier (~10 req/min, 250/day) | Dev, demos, smoke-testing without burning tokens |
 
@@ -151,7 +151,7 @@ POST /chat               ──→  + Bearer key from env  ──→   :free mod
 
 - The OpenRouter key lives **only** in the Worker's environment (`wrangler secret put`). It never enters the dashboard bundle, never enters git.
 - Per-IP rate limit (10 req/min, 50/day, both adjustable in `wrangler.toml`) caps abuse at quota exhaustion — not a bill.
-- Free OpenRouter model: `google/gemini-2.0-flash-exp:free` by default. Swap any `:free` model in `wrangler.toml`.
+- Free OpenRouter model: `meta-llama/llama-3.3-70b-instruct:free` by default (stable, good tool-calling). Swap any `:free` model in `wrangler.toml` — list at [openrouter.ai/models?supported_parameters=tools&max_price=0](https://openrouter.ai/models?supported_parameters=tools&max_price=0).
 - On `429`, the chat surfaces an inline "use my Claude/Gemini key" CTA that hot-swaps the provider.
 
 See `worker/README.md` for the full Cloudflare setup (5 commands, ~10 minutes). On the dashboard side, set:

@@ -25,8 +25,10 @@ account_id = "REPLACE_WITH_YOUR_CLOUDFLARE_ACCOUNT_ID"
 [vars]
 ALLOWED_ORIGINS = "http://localhost:3000,https://olegmikhaylov0001.github.io"
 
-# Free tier model on OpenRouter. Swap for any `:free` model if this one is deprecated.
-DEFAULT_MODEL = "google/gemini-2.0-flash-exp:free"
+# Free tier model on OpenRouter. Swap for any `:free` model if this one is deprecated —
+# check https://openrouter.ai/models?supported_parameters=tools&max_price=0
+# Current pick: Llama 3.3 70B — stable, good tool calling, on free tier for months.
+DEFAULT_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 
 # Per-IP rate limits. Tuned to give a real demo experience without inviting abuse.
 MAX_RPM = "10"

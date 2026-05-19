@@ -6,7 +6,7 @@ Tiny edge proxy that lets the dashboard chat work for visitors **without** askin
 
 - Accepts `POST` from the dashboard (CORS-restricted to allowed origins)
 - Enforces per-IP rate limits (10 req/min, 50 req/day by default) via Cloudflare KV
-- Adds the OpenRouter Bearer token (from `OPENROUTER_KEY` secret) and the hardcoded free model (`google/gemini-2.0-flash-exp:free`)
+- Adds the OpenRouter Bearer token (from `OPENROUTER_KEY` secret) and the hardcoded free model (`meta-llama/llama-3.3-70b-instruct:free` — pick any other `:free` model from [openrouter.ai/models?supported_parameters=tools&max_price=0](https://openrouter.ai/models?supported_parameters=tools&max_price=0))
 - Forwards the chat-completion request to `https://openrouter.ai/api/v1/chat/completions`
 - Returns the response unchanged (with CORS headers patched in)
 
