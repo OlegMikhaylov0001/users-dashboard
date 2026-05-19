@@ -164,16 +164,20 @@ export function ChatWidget() {
     return isProviderId(stored) ? stored : DEFAULT_PROVIDER;
   });
   const [apiKeys, setApiKeys] = useState<Record<ProviderId, string | null>>(() => {
-    if (typeof window === "undefined") return { anthropic: null, google: null };
+    if (typeof window === "undefined") return { demo: null, anthropic: null, google: null };
     return {
+      demo: null, // demo provider doesn't accept a user key
       anthropic: window.localStorage.getItem(PROVIDERS.anthropic.apiKeyStorageKey),
       google: window.localStorage.getItem(PROVIDERS.google.apiKeyStorageKey),
     };
   });
   // localStorage takes precedence over bundled default; default is the fallback.
+  // For the keyless demo provider, DEFAULT_KEYS["demo"] holds the Worker URL.
   const apiKey = apiKeys[provider] || DEFAULT_KEYS[provider] || null;
-  const usingDefaultKey = !apiKeys[provider] && !!DEFAULT_KEYS[provider];
   const providerCfg = PROVIDERS[provider];
+  // "default" hint only makes sense for keyed providers; demo isn't really a "key".
+  const usingDefaultKey =
+    providerCfg.requiresKey && !apiKeys[provider] && !!DEFAULT_KEYS[provider];
   const [keyInput, setKeyInput] = useState("");
   const [persistKey, setPersistKey] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -286,7 +290,11 @@ export function ChatWidget() {
     }
 
     if (!apiKey) {
-      setError(`${providerCfg.shortLabel} API key required — open settings.`);
+      setError(
+        providerCfg.requiresKey
+          ? `${providerCfg.shortLabel} API key required — open settings.`
+          : `Demo endpoint not configured (NEXT_PUBLIC_DEMO_WORKER_URL).`,
+      );
       return;
     }
 
@@ -385,7 +393,9 @@ export function ChatWidget() {
 
   if (!ctx) return null;
 
-  const needsKey = !apiKey || settingsOpen;
+  // Open the settings dialog automatically when the current provider needs a key
+  // and we don't have one (saved or default). Keyless demo provider skips this.
+  const needsKey = (providerCfg.requiresKey && !apiKey) || settingsOpen;
 
   return (
     <>
@@ -468,7 +478,8 @@ export function ChatWidget() {
                   const savedKey = Boolean(apiKeys[id]);
                   const defaultKey = Boolean(DEFAULT_KEYS[id]);
                   let badge: { text: string; color: string };
-                  if (savedKey) badge = { text: "your key", color: "text-green-600 dark:text-green-400" };
+                  if (!p.requiresKey) badge = { text: "free demo", color: "text-emerald-600 dark:text-emerald-400" };
+                  else if (savedKey) badge = { text: "your key", color: "text-green-600 dark:text-green-400" };
                   else if (defaultKey) badge = { text: "default", color: "text-[#6F50D9] dark:text-[#9b85e8]" };
                   else badge = { text: "no key", color: "text-zinc-400" };
                   return (
@@ -496,40 +507,57 @@ export function ChatWidget() {
                 })}
               </div>
 
-              <p className="font-semibold mb-1">{providerCfg.shortLabel} API key</p>
-              <p className="text-[12px] text-zinc-500 dark:text-zinc-400 mb-3">
-                {providerCfg.pricingNote} The request goes directly from your browser to{" "}
-                <a className="underline" href={providerCfg.apiKeyConsoleUrl} target="_blank" rel="noreferrer">
-                  {providerCfg.apiKeyConsoleLabel}
-                </a>
-                .
-              </p>
+              {providerCfg.requiresKey ? (
+                <>
+                  <p className="font-semibold mb-1">{providerCfg.shortLabel} API key</p>
+                  <p className="text-[12px] text-zinc-500 dark:text-zinc-400 mb-3">
+                    {providerCfg.pricingNote} The request goes directly from your browser to{" "}
+                    <a className="underline" href={providerCfg.apiKeyConsoleUrl} target="_blank" rel="noreferrer">
+                      {providerCfg.apiKeyConsoleLabel}
+                    </a>
+                    .
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="font-semibold mb-1">Free demo — no key needed</p>
+                  <p className="text-[12px] text-zinc-500 dark:text-zinc-400 mb-3">
+                    {providerCfg.pricingNote} Switch to Claude or Gemini if you need a higher quota or specific model.
+                  </p>
+                </>
+              )}
               {usingDefaultKey && (
                 <p className="text-[12px] text-[#6F50D9] dark:text-[#9b85e8] mb-3 bg-[#6F50D9]/5 border border-[#6F50D9]/20 rounded-lg px-2.5 py-1.5">
                   Currently using the bundled default key. Paste your own below to override (saved in localStorage, takes precedence).
                 </p>
               )}
-              <input
-                type="password"
-                value={keyInput}
-                onChange={(e) => setKeyInput(e.target.value)}
-                placeholder={providerCfg.apiKeyPlaceholder}
-                className="w-full h-9 px-3 border border-zinc-200 dark:border-zinc-700 rounded-lg bg-zinc-50 dark:bg-zinc-800 text-[13px] placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-[#185FA5]/30 focus:border-[#185FA5]"
-              />
-              <label className="flex items-center gap-2 mt-2 text-[12px] text-zinc-500 dark:text-zinc-400">
-                <input type="checkbox" checked={persistKey} onChange={(e) => setPersistKey(e.target.checked)} />
-                Remember in this browser (localStorage)
-              </label>
+              {providerCfg.requiresKey && (
+                <input
+                  type="password"
+                  value={keyInput}
+                  onChange={(e) => setKeyInput(e.target.value)}
+                  placeholder={providerCfg.apiKeyPlaceholder}
+                  className="w-full h-9 px-3 border border-zinc-200 dark:border-zinc-700 rounded-lg bg-zinc-50 dark:bg-zinc-800 text-[13px] placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-[#185FA5]/30 focus:border-[#185FA5]"
+                />
+              )}
+              {providerCfg.requiresKey && (
+                <label className="flex items-center gap-2 mt-2 text-[12px] text-zinc-500 dark:text-zinc-400">
+                  <input type="checkbox" checked={persistKey} onChange={(e) => setPersistKey(e.target.checked)} />
+                  Remember in this browser (localStorage)
+                </label>
+              )}
               <div className="flex gap-2 mt-3">
-                <button
-                  type="button"
-                  onClick={saveKey}
-                  disabled={!keyInput.trim()}
-                  className="px-3 py-1.5 rounded-lg bg-[#185FA5] hover:bg-[#144d85] disabled:opacity-50 text-white text-[13px] font-medium transition-colors"
-                >
-                  Save
-                </button>
-                {apiKey && (
+                {providerCfg.requiresKey && (
+                  <button
+                    type="button"
+                    onClick={saveKey}
+                    disabled={!keyInput.trim()}
+                    className="px-3 py-1.5 rounded-lg bg-[#185FA5] hover:bg-[#144d85] disabled:opacity-50 text-white text-[13px] font-medium transition-colors"
+                  >
+                    Save
+                  </button>
+                )}
+                {providerCfg.requiresKey && apiKeys[provider] && (
                   <button
                     type="button"
                     onClick={forgetKey}
@@ -650,11 +678,44 @@ export function ChatWidget() {
                     </div>
                   </div>
                 )}
-                {error && (
-                  <div className="bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900 rounded-lg px-3 py-2 text-[12px]">
-                    {error}
-                  </div>
-                )}
+                {error && (() => {
+                  const isDemoLimit = error.toLowerCase().includes("demo limit");
+                  return (
+                    <div className={
+                      isDemoLimit
+                        ? "bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200 border border-amber-200 dark:border-amber-900 rounded-lg px-3 py-2 text-[12px] space-y-2"
+                        : "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900 rounded-lg px-3 py-2 text-[12px]"
+                    }>
+                      <div>{error}</div>
+                      {isDemoLimit && (
+                        <div className="flex gap-1.5 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setError(null);
+                              setSettingsOpen(true);
+                              switchProvider("anthropic");
+                            }}
+                            className="px-2 py-0.5 rounded border border-amber-300 dark:border-amber-800 text-[11px] font-medium hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors"
+                          >
+                            Use my Claude key
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setError(null);
+                              setSettingsOpen(true);
+                              switchProvider("google");
+                            }}
+                            className="px-2 py-0.5 rounded border border-amber-300 dark:border-amber-800 text-[11px] font-medium hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors"
+                          >
+                            Use my Gemini key
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
 
               {turns.length === 0 && (

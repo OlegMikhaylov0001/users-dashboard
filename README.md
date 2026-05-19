@@ -68,14 +68,15 @@ The main view is a single-page client dashboard. All 208 users are fetched serve
 
 ### AI chat assistant (`/`, floating widget)
 
-A floating action button in the bottom-right corner opens a chat panel ("Ask about these users"). The agent supports **two providers** (chosen in the settings dialog):
+A floating action button in the bottom-right corner opens a chat panel ("Ask about these users"). The agent supports **three providers** (chosen in the settings dialog):
 
 | Provider | Default model | Pricing | When to use |
 |---|---|---|---|
+| **Demo** (when configured) | `llama-3.3-70b:free` via OpenRouter | Free — shared proxy, ~10 req/min, 50/day per IP | Visitors who don't want to provision a key. Default when set up. |
 | Anthropic | `claude-sonnet-4-6` | Paid — your key, your bill | Production-quality answers, complex multi-step reasoning |
 | Google | `gemini-2.5-flash` | Free tier (~10 req/min, 250/day) | Dev, demos, smoke-testing without burning tokens |
 
-Both providers are wired through the same five tools:
+All three providers route through the same five tools:
 
 | Tool | What it does |
 |---|---|
@@ -135,9 +136,36 @@ The standard pattern of two stacked `<input type="range" class="opacity-0">` ele
 
 A right-side detail panel that slides out when you click a list item is a common pattern, but it reads as "selection" rather than "detail" — the user clicked something and expected to go somewhere, not have a panel appear beside them. A centred overlay with a backdrop is unambiguous: you opened something, you close it with `Esc` or the backdrop.
 
-### Why two providers behind one interface
+### Demo provider — shared OpenRouter proxy via Cloudflare Worker
 
-The chat ships with both **Anthropic** and **Google** behind a small registry (`app/lib/providers.ts`). The registry exposes a `runChat` function with an identical signature for every provider; the message format, tool schemas, and `ChatUsage` shape are normalised, and each provider's adapter translates to its native wire format (Anthropic Messages API for Claude, `generativelanguage.googleapis.com/v1beta` for Gemini).
+The demo provider exists so a casual visitor can try the chat without signing up for any LLM service. It routes through a small Cloudflare Worker (~150 lines in `worker/src/index.ts`) that:
+
+```
+Browser (GitHub Pages)        Cloudflare Worker             OpenRouter
+─────────────────────         ──────────────────            ──────────────
+POST /chat               ──→  + Bearer key from env  ──→   :free model
+{messages, tools}             + per-IP rate limit          (Gemini Flash,
+                              + origin allowlist           Llama 3.3, etc)
+                         ←──  + CORS headers          ←──
+```
+
+- The OpenRouter key lives **only** in the Worker's environment (`wrangler secret put`). It never enters the dashboard bundle, never enters git.
+- Per-IP rate limit (10 req/min, 50/day, both adjustable in `wrangler.toml`) caps abuse at quota exhaustion — not a bill.
+- Free OpenRouter model: `meta-llama/llama-3.3-70b-instruct:free` by default (stable, good tool-calling). Swap any `:free` model in `wrangler.toml` — list at [openrouter.ai/models?supported_parameters=tools&max_price=0](https://openrouter.ai/models?supported_parameters=tools&max_price=0).
+- On `429`, the chat surfaces an inline "use my Claude/Gemini key" CTA that hot-swaps the provider.
+
+See `worker/README.md` for the full Cloudflare setup (5 commands, ~10 minutes). On the dashboard side, set:
+
+```bash
+# .env.local (dev)
+NEXT_PUBLIC_DEMO_WORKER_URL=https://users-dashboard-chat.<your-name>.workers.dev/chat
+```
+
+…and add the same as a repo variable in GitHub Actions for production builds.
+
+### Why three providers behind one interface
+
+The chat ships with **Anthropic**, **Google**, and an optional **demo** (OpenRouter via Cloudflare Worker) behind a small registry (`app/lib/providers.ts`). The registry exposes a `runChat` function with an identical signature for every provider; the message format, tool schemas, and `ChatUsage` shape are normalised, and each provider's adapter translates to its native wire format (Anthropic Messages API for Claude, `generativelanguage.googleapis.com/v1beta` for Gemini, OpenAI Chat Completions for OpenRouter).
 
 Three reasons for the split:
 
@@ -176,6 +204,7 @@ app/
 │   ├── users.ts            # getFilterOptions (extract unique depts, countries…)
 │   ├── anthropic.ts        # Anthropic Messages API client + tool-use agent loop
 │   ├── gemini.ts           # Google Gemini API client + tool-use agent loop
+│   ├── openrouter.ts       # OpenAI-format client targeting our Cloudflare Worker (demo)
 │   ├── providers.ts        # registry — selects runChat impl + pricing per provider id
 │   ├── pricing.ts          # per-provider token pricing tables + cost helpers
 │   └── chatTools.ts        # tool schemas (zod) + executor (stats/query/apply/clear/open)
@@ -235,6 +264,7 @@ app/
 1. `npm run dev`, open `http://localhost:3000`.
 2. Click the blue chat button in the bottom-right corner.
 3. In the settings dialog pick a provider:
+   - **Demo (no key — free tier)** — shows up only when `NEXT_PUBLIC_DEMO_WORKER_URL` is configured. Uses the project's Cloudflare Worker proxy to OpenRouter free models. Rate-limited per IP (10/min, 50/day). See `worker/README.md` for the Cloudflare side.
    - **Anthropic (Claude)** — paid; get a key at [console.anthropic.com](https://console.anthropic.com/) (`sk-ant-...`). Stored in `localStorage` under `ud_anthropic_key`.
    - **Google (Gemini, free tier)** — free up to ~10 RPM / 250 RPD; get a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (`AIzaSy...`). Stored under `ud_google_key`.
 4. Ask anything — "show only female moderators", "top 5 countries among admins", "open the card of Ava Taylor".

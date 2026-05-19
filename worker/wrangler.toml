@@ -1,0 +1,47 @@
+# Cloudflare Worker: OpenRouter proxy for the dashboard chat demo.
+#
+# Setup steps:
+#   1. npm install -g wrangler && wrangler login
+#   2. Replace `account_id` below with yours (dash.cloudflare.com → Workers → top-right corner)
+#   3. Create a KV namespace for rate limiting:
+#        cd worker && wrangler kv namespace create RATE_LIMIT_KV
+#      and paste the `id` it prints into the [[kv_namespaces]] block.
+#   4. Put your OpenRouter key as a secret (never in this file):
+#        wrangler secret put OPENROUTER_KEY
+#   5. Deploy:
+#        wrangler deploy
+#      You will get a URL like  https://users-dashboard-chat.<your-name>.workers.dev
+#   6. In the dashboard repo set NEXT_PUBLIC_DEMO_WORKER_URL to that URL (.env.local + GitHub Actions secret).
+
+name = "users-dashboard-chat"
+main = "src/index.ts"
+compatibility_date = "2026-05-19"
+
+# Find this on dash.cloudflare.com → Workers & Pages → top-right corner.
+# Leave the placeholder until you set it locally.
+account_id = "REPLACE_WITH_YOUR_CLOUDFLARE_ACCOUNT_ID"
+
+# Comma-separated origins allowed to call this Worker. Update on deploy.
+[vars]
+ALLOWED_ORIGINS = "http://localhost:3000,https://olegmikhaylov0001.github.io"
+
+# Free tier model on OpenRouter. Swap for any `:free` model if this one is deprecated —
+# check https://openrouter.ai/models?supported_parameters=tools&max_price=0
+# Current pick: Llama 3.3 70B — stable, good tool calling, on free tier for months.
+DEFAULT_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
+
+# Per-IP rate limits. Tuned to give a real demo experience without inviting abuse.
+MAX_RPM = "10"
+MAX_RPD = "50"
+
+# KV namespace for per-IP rate limit counters.
+# To use your own instead of the project default: run
+#   wrangler kv namespace create RATE_LIMIT_KV
+# and replace `id` below with the printed value.
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "b0c342818fac4324b013235c88629875"
+
+# Secrets are NOT defined here — they are uploaded via `wrangler secret put`.
+# Required secrets:
+#   OPENROUTER_KEY   — your sk-or-v1-... from openrouter.ai/keys
