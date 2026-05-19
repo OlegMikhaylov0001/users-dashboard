@@ -1,106 +1,113 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
+import { I } from "../icons";
+
+export interface FilterOption {
+  value: string;
+  label: string;
+}
 
 interface FilterChipProps {
   label: string;
-  activeLabel: string;
-  options: string[];
-  onSelect: (v: string) => void;
+  value: string;
+  options: FilterOption[];
+  onSelect: (value: string) => void;
   onClear: () => void;
+  searchable?: boolean;
 }
 
-export function FilterChip({ label, activeLabel, options, onSelect, onClear }: FilterChipProps) {
+export function FilterChip({ label, value, options, onSelect, onClear, searchable = false }: FilterChipProps) {
   const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState("");
-  const ref = useRef<HTMLDivElement>(null);
-  const searchRef = useRef<HTMLInputElement>(null);
-  const active = Boolean(activeLabel);
+  const [q, setQ] = useState("");
+  const anchorRef = useRef<HTMLButtonElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
 
-  useEffect(() => {
-    function h(e: PointerEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    }
-    document.addEventListener("pointerdown", h);
-    return () => document.removeEventListener("pointerdown", h);
-  }, []);
+  const active = Boolean(value);
+  const display = active ? options.find((o) => o.value === value)?.label ?? label : label;
 
-  useEffect(() => {
-    if (open) setTimeout(() => searchRef.current?.focus(), 0);
-    else setSearch("");
-  }, [open]);
-
-  const visible = search
-    ? options.filter((o) => o.toLowerCase().includes(search.toLowerCase()))
+  const filtered = searchable && q
+    ? options.filter((o) => o.label.toLowerCase().includes(q.toLowerCase()))
     : options;
 
-  return (
-    <div ref={ref} className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className={[
-          "flex items-center gap-1 px-3 py-1.5 rounded-full text-[13px] border transition-colors whitespace-nowrap",
-          active
-            ? "border-[#185FA5] text-[#185FA5] bg-[#E6F1FB] dark:bg-blue-900/20 dark:text-blue-300 dark:border-blue-600"
-            : "border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400 hover:border-zinc-300",
-        ].join(" ")}
-      >
-        {active ? activeLabel : label}
-        <svg className="w-2.5 h-2.5" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5">
-          <path d="M2 3.5l3 3 3-3" />
-        </svg>
-      </button>
+  useEffect(() => {
+    if (!open || !anchorRef.current) return;
+    const r = anchorRef.current.getBoundingClientRect();
+    setPos({ top: r.bottom + 4, left: Math.max(8, r.left) });
+    const onDoc = (e: MouseEvent) => {
+      if (!popRef.current?.contains(e.target as Node) && !anchorRef.current?.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
 
-      {open && (
-        <div className="absolute top-full left-0 mt-1 z-50 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-xl shadow-lg min-w-[160px] max-w-[240px] overflow-hidden">
-          {options.length > 6 && (
-            <div className="p-2 border-b border-zinc-100 dark:border-zinc-700">
+  return (
+    <>
+      <button
+        ref={anchorRef}
+        type="button"
+        className={"filter-chip" + (active ? " active" : "")}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span>{display}</span>
+        {active ? (
+          <span
+            className="filter-chip-x"
+            onClick={(e) => {
+              e.stopPropagation();
+              onClear();
+            }}
+          >
+            <I.X size={11} />
+          </span>
+        ) : (
+          <I.ChevDown size={11} style={{ opacity: 0.6 }} />
+        )}
+      </button>
+      {open && pos && (
+        <div ref={popRef} className="popover" style={{ top: pos.top, left: pos.left, width: searchable ? 240 : 200 }}>
+          {searchable && (
+            <div className="popover-search">
               <input
-                ref={searchRef}
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search…"
-                className="w-full px-2 py-1.5 text-[13px] rounded-md border border-zinc-200 dark:border-zinc-600 bg-white dark:bg-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-[#185FA5]/30"
+                autoFocus
+                placeholder={`Search ${label.toLowerCase()}…`}
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
               />
             </div>
           )}
-          <ul className="max-h-52 overflow-y-auto py-1">
-            <li>
+          <div style={{ maxHeight: 260, overflow: "auto" }}>
+            {filtered.length === 0 && (
+              <div style={{ padding: "10px 12px", fontSize: 12, color: "var(--fg-tertiary)" }}>No results</div>
+            )}
+            {filtered.map((o) => (
               <button
                 type="button"
-                onClick={() => { onClear(); setOpen(false); }}
-                className={`w-full text-left px-3 py-2 text-[13px] transition-colors ${
-                  !active
-                    ? "text-[#185FA5] font-medium bg-[#E6F1FB] dark:bg-blue-900/20 dark:text-blue-300"
-                    : "text-zinc-500 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-700"
-                }`}
+                key={o.value}
+                className={"popover-item" + (o.value === value ? " active" : "")}
+                onClick={() => {
+                  onSelect(o.value);
+                  setOpen(false);
+                  setQ("");
+                }}
               >
-                {label}
+                <span style={{ flex: 1 }}>{o.label}</span>
+                {o.value === value && <I.Check size={12} />}
               </button>
-            </li>
-            {visible.map((opt) => (
-              <li key={opt}>
-                <button
-                  type="button"
-                  onClick={() => { onSelect(opt); setOpen(false); }}
-                  className={`w-full text-left px-3 py-2 text-[13px] transition-colors ${
-                    activeLabel === opt
-                      ? "text-[#185FA5] font-medium bg-[#E6F1FB] dark:bg-blue-900/20 dark:text-blue-300"
-                      : "text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-700"
-                  }`}
-                >
-                  {opt}
-                </button>
-              </li>
             ))}
-            {visible.length === 0 && (
-              <li className="px-3 py-2 text-[13px] text-zinc-400">No results</li>
-            )}
-          </ul>
+          </div>
         </div>
       )}
-    </div>
+    </>
   );
 }

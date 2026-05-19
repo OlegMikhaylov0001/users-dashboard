@@ -1,26 +1,15 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useMemo, useState } from "react";
 import type { User } from "../types";
-import { DarkCtx } from "./dark-ctx";
-import { useDark } from "../hooks/useDark";
-import { useDashboard } from "../hooks/useDashboard";
-import { useIsMobile } from "../hooks/useIsMobile";
-import { ACCENT, PER_PAGE } from "../lib/palette";
-import { RoleDonut, AgeHistogram, DeptBar, GenderBreakdown } from "./Charts";
-import { Sidebar } from "./Sidebar";
-import { StatsCards } from "./StatsCards";
-import { FilterChip } from "./ui/FilterChip";
-import { AgeRangeChip } from "./ui/AgeSlider";
-import { Pagination } from "./ui/Pagination";
-import { UserCard } from "./users/UserCard";
-import { UserRow } from "./users/UserRow";
-import { UserModal } from "./users/UserModal";
-import type { ViewMode } from "../hooks/useDashboard";
 import { DashboardCtx } from "./dashboard-ctx";
+import { useDashboard, type SortKey } from "../hooks/useDashboard";
+import { Sidebar } from "./Sidebar";
+import { FilterChip } from "./ui/FilterChip";
+import { UserTable, type TableSortKey } from "./users/UserTable";
+import { SidePanel } from "./users/SidePanel";
 import { ChatWidget } from "./ChatWidget";
-
-// ── types ─────────────────────────────────────────────────────────────────────
+import { I } from "./icons";
 
 interface DashboardProps {
   users: User[];
@@ -30,303 +19,446 @@ interface DashboardProps {
   states: string[];
 }
 
-// ── component ─────────────────────────────────────────────────────────────────
+const SAVED_PRESETS = [
+  { id: "eng", name: "Engineering", department: "Engineering" },
+  { id: "hr", name: "HR team", department: "Human Resources" },
+  { id: "marketing", name: "Marketing", department: "Marketing" },
+  { id: "leaders", name: "Leadership", role: "admin" as const },
+];
+
+type Tab = "all" | "admin" | "moderator" | "female" | "male";
+
+// Map table sort keys to internal useDashboard SortKey
+function toInternalSort(k: TableSortKey): SortKey {
+  if (k === "name") return "firstName";
+  if (k === "department") return "dept";
+  if (k === "age") return "age";
+  return "firstName"; // role/title/city — fall back to firstName for now
+}
 
 export default function Dashboard({ users, departments, titles, countries, states }: DashboardProps) {
-  const isDark    = useDark();
-  const isMobile  = useIsMobile();
-  const db        = useDashboard(users);
+  const db = useDashboard(users);
+  const [tab, setTab] = useState<Tab>("all");
+  const [active, setActive] = useState<"users" | "charts" | "admins">("users");
+  const [activeSavedId, setActiveSavedId] = useState<string | null>(null);
+  const [tableSort, setTableSort] = useState<{ key: TableSortKey; dir: "asc" | "desc" }>({
+    key: "name",
+    dir: "asc",
+  });
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [cursorId, setCursorId] = useState<number | null>(null);
 
-  const [sidebarOpen, setSidebarOpen]           = useState(false);
-  const [mobileVisibleCount, setMobileVisibleCount] = useState(PER_PAGE);
-  const sentinelRef = useRef<HTMLDivElement>(null);
+  const adminsCount = useMemo(() => users.filter((u) => u.role === "admin").length, [users]);
 
-  const closeSidebar = () => setSidebarOpen(false);
+  const savedViews = useMemo(
+    () =>
+      SAVED_PRESETS.map((p) => {
+        const count = users.filter((u) =>
+          p.department ? u.company.department === p.department : u.role === p.role,
+        ).length;
+        return { id: p.id, name: p.name, count, department: p.department, role: p.role };
+      }),
+    [users],
+  );
 
-  // Reset infinite-scroll counter whenever the filtered list changes
-  useEffect(() => {
-    setMobileVisibleCount(PER_PAGE);
-  }, [db.filtered]);
+  const applySaved = (id: string) => {
+    const v = savedViews.find((x) => x.id === id);
+    if (!v) return;
+    db.clear();
+    if (v.department) db.applyPreset(v.department);
+    else if (v.role) db.setFilter("role", v.role);
+    setActiveSavedId(id);
+  };
 
-  // Infinite scroll — observe the sentinel element at list bottom
-  useEffect(() => {
-    const sentinel = sentinelRef.current;
-    if (!sentinel || !isMobile) return;
+  // Apply tab on top of regular filters
+  const tabFiltered = useMemo(() => {
+    let list = db.filtered;
+    if (tab === "admin") list = list.filter((u) => u.role === "admin");
+    else if (tab === "moderator") list = list.filter((u) => u.role === "moderator");
+    else if (tab === "female") list = list.filter((u) => u.gender === "female");
+    else if (tab === "male") list = list.filter((u) => u.gender === "male");
+    // Custom sort by city — fall through to default useDashboard sort otherwise
+    if (tableSort.key === "city") {
+      list = [...list].sort((a, b) => a.address.city.localeCompare(b.address.city));
+    } else if (tableSort.key === "role") {
+      list = [...list].sort((a, b) => a.role.localeCompare(b.role));
+    } else if (tableSort.key === "title") {
+      list = [...list].sort((a, b) => a.company.title.localeCompare(b.company.title));
+    }
+    if (tableSort.dir === "desc") list = list.reverse();
+    return list;
+  }, [db.filtered, tab, tableSort]);
 
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting) {
-          setMobileVisibleCount((c) => c + PER_PAGE);
-        }
-      },
-      { threshold: 0 },
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [isMobile]); // stable dep — functional updater avoids stale closures
+  const counts = useMemo(
+    () => ({
+      all: db.filtered.length,
+      admin: db.filtered.filter((u) => u.role === "admin").length,
+      moderator: db.filtered.filter((u) => u.role === "moderator").length,
+      female: db.filtered.filter((u) => u.gender === "female").length,
+      male: db.filtered.filter((u) => u.gender === "male").length,
+    }),
+    [db.filtered],
+  );
 
-  const mobileUsers  = db.filtered.slice(0, mobileVisibleCount);
-  const hasMoreItems = mobileVisibleCount < db.filtered.length;
+  const onTableSort = (key: TableSortKey) => {
+    if (key === tableSort.key) {
+      setTableSort({ key, dir: tableSort.dir === "asc" ? "desc" : "asc" });
+    } else {
+      setTableSort({ key, dir: "asc" });
+    }
+    db.setSort(toInternalSort(key));
+  };
 
-  // ── render ──────────────────────────────────────────────────────────────────
+  const toggleSelect = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const toggleAll = () => {
+    if (tabFiltered.every((u) => selectedIds.has(u.id))) setSelectedIds(new Set());
+    else setSelectedIds(new Set(tabFiltered.map((u) => u.id)));
+  };
+
+  // Side panel nav helpers
+  const openIdx = db.selected ? tabFiltered.findIndex((u) => u.id === db.selected!.id) : -1;
+  const onNext = openIdx >= 0 && openIdx < tabFiltered.length - 1
+    ? () => db.setSelected(tabFiltered[openIdx + 1])
+    : undefined;
+  const onPrev = openIdx > 0
+    ? () => db.setSelected(tabFiltered[openIdx - 1])
+    : undefined;
+
+  // KPIs for charts strip
+  const total = tabFiltered.length;
+  const avgAge = total ? Math.round(tabFiltered.reduce((s, u) => s + u.age, 0) / total) : 0;
+  const deptCounts: Record<string, number> = {};
+  tabFiltered.forEach((u) => {
+    deptCounts[u.company.department] = (deptCounts[u.company.department] ?? 0) + 1;
+  });
+  const topDept = Object.entries(deptCounts).sort((a, b) => b[1] - a[1])[0] ?? ["—", 0];
+  const femaleCount = tabFiltered.filter((u) => u.gender === "female").length;
+  const fPct = total ? Math.round((femaleCount / total) * 100) : 0;
+  const buckets = [0, 0, 0, 0, 0];
+  tabFiltered.forEach((u) => {
+    const b = u.age < 26 ? 0 : u.age < 36 ? 1 : u.age < 46 ? 2 : u.age < 56 ? 3 : 4;
+    buckets[b]++;
+  });
+  const maxB = Math.max(...buckets, 1);
 
   return (
-    <DarkCtx.Provider value={isDark}>
-      <DashboardCtx.Provider
-        value={{
-          users,
-          setFilter: db.setFilter,
-          applyPreset: db.applyPreset,
-          clear: db.clear,
-          onAgeChange: db.onAgeChange,
-          setSelected: db.setSelected,
-          getCurrentFilters: () => ({ ...db.filters, ageFilter: db.ageFilter }),
-        }}
-      >
-      <div className="flex flex-col h-screen overflow-hidden bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100">
+    <DashboardCtx.Provider
+      value={{
+        users,
+        setFilter: db.setFilter,
+        applyPreset: db.applyPreset,
+        clear: () => {
+          db.clear();
+          setActiveSavedId(null);
+        },
+        onAgeChange: db.onAgeChange,
+        setSelected: db.setSelected,
+        getCurrentFilters: () => ({ ...db.filters, ageFilter: db.ageFilter }),
+      }}
+    >
+      <div className="app">
+        <Sidebar
+          totalUsers={users.length}
+          adminsCount={adminsCount}
+          savedViews={savedViews}
+          activeSavedId={activeSavedId}
+          onApplySaved={applySaved}
+          onClearFilters={() => {
+            db.clear();
+            setActiveSavedId(null);
+          }}
+          active={active}
+          onSelectActive={setActive}
+        />
 
-        {/* ── Topbar — h-14 (56px) so sidebar can use top-14 on mobile ── */}
-        <div className="flex items-center gap-2 sm:gap-3 px-4 sm:px-5 h-14 shrink-0 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
-          {/* Hamburger */}
-          <button
-            type="button"
-            onClick={() => setSidebarOpen((v) => !v)}
-            className="lg:hidden w-8 h-8 flex items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors shrink-0"
-            aria-label="Open menu"
-          >
-            <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-              <path d="M2 4h12M2 8h12M2 12h12" />
-            </svg>
-          </button>
-
-          {/* Search */}
-          <div className="flex-1 relative">
-            <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-              <circle cx="7" cy="7" r="4" /><path d="M10 10l3 3" />
-            </svg>
-            <input
-              type="text"
-              value={db.filters.q}
-              onChange={(e) => db.setFilter("q", e.target.value)}
-              placeholder="Search by name, email or username…"
-              className="w-full h-8 pl-8 pr-3 border border-zinc-200 dark:border-zinc-700 rounded-lg bg-zinc-50 dark:bg-zinc-800 text-[13px] placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:border-[#185FA5]"
-              style={{ "--tw-ring-color": `${ACCENT}30` } as React.CSSProperties}
-            />
-          </div>
-
-          {/* View toggle */}
-          <div className="flex border border-zinc-200 dark:border-zinc-700 rounded-lg overflow-hidden shrink-0">
-            {(["grid", "list"] as ViewMode[]).map((v) => (
-              <button key={v} type="button" onClick={() => db.setView(v)}
-                className={`w-8 h-8 flex items-center justify-center transition-colors ${
-                  db.view === v
-                    ? "bg-zinc-100 dark:bg-zinc-700"
-                    : "bg-white dark:bg-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-700"
-                }`}>
-                {v === "grid" ? (
-                  <svg className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                    <rect x="1" y="1" width="6" height="6" rx="1" /><rect x="9" y="1" width="6" height="6" rx="1" />
-                    <rect x="1" y="9" width="6" height="6" rx="1" /><rect x="9" y="9" width="6" height="6" rx="1" />
-                  </svg>
-                ) : (
-                  <svg className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                    <path d="M2 4h12M2 8h12M2 12h12" />
-                  </svg>
-                )}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* ── Content row ── */}
-        <div className="flex flex-1 min-h-0">
-
-          {/* Mobile backdrop — starts below topbar (top-14) */}
-          {sidebarOpen && (
-            <div
-              className="fixed inset-x-0 top-14 bottom-0 z-30 bg-black/40 lg:hidden"
-              onClick={closeSidebar}
-            />
-          )}
-
-          {/* Sidebar — fixed below topbar on mobile, static on lg+ */}
-          <div className={[
-            "fixed top-14 bottom-0 left-0 z-40",
-            "transition-transform duration-200 ease-in-out",
-            "lg:static lg:top-auto lg:bottom-auto lg:z-auto lg:translate-x-0",
-            sidebarOpen ? "translate-x-0" : "-translate-x-full",
-          ].join(" ")}>
-            <Sidebar
-              totalUsers={users.length}
-              filters={db.filters}
-              showCharts={db.showCharts}
-              onClear={db.clear}
-              onToggleCharts={() => db.setShowCharts((v) => !v)}
-              onFilterRole={(role) => db.setFilter("role", role)}
-              onApplyPreset={db.applyPreset}
-              onClose={closeSidebar}
-            />
-          </div>
-
-          {/* ── Main column ── */}
-          <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-
-            {/* Filter bar – primary */}
-            <div className="flex items-center gap-2 px-4 sm:px-5 py-2.5 border-b border-zinc-200 dark:border-zinc-800 shrink-0 flex-wrap">
-              <FilterChip label="All roles"   activeLabel={db.filters.role}       options={["admin", "moderator", "user"]}
-                onSelect={(v) => db.setFilter("role", v)}       onClear={() => db.setFilter("role", "")} />
-              <FilterChip label="Department"  activeLabel={db.filters.department}  options={departments}
-                onSelect={(v) => db.setFilter("department", v)} onClear={() => db.setFilter("department", "")} />
-              <FilterChip label="All genders" activeLabel={db.filters.gender}      options={["male", "female"]}
-                onSelect={(v) => db.setFilter("gender", v)}     onClear={() => db.setFilter("gender", "")} />
-              {db.hasFilters && (
-                <button type="button" onClick={db.clear}
-                  className="text-[13px] text-zinc-400 hover:text-red-500 transition-colors px-1">
-                  Clear all
-                </button>
-              )}
-              <button type="button" onClick={() => db.setShowMore((v) => !v)}
-                className="ml-auto text-[13px] text-zinc-400 border border-dashed border-zinc-300 dark:border-zinc-600 px-2.5 py-1 rounded-full hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors whitespace-nowrap">
-                {db.showMore ? "↑ Less" : "+ More filters"}
-              </button>
+        <div className="main">
+          {/* Topbar */}
+          <div className="topbar">
+            <div className="topbar-title">
+              <span style={{ color: "var(--fg-tertiary)", fontWeight: 500 }}>Workspace</span>
+              <span className="topbar-crumb-sep">/</span>
+              <span>Users</span>
+              <span className="topbar-count tabular">{tabFiltered.length}</span>
             </div>
-
-            {/* Filter bar – secondary */}
-            {db.showMore && (
-              <div className="flex items-center gap-2 px-4 sm:px-5 py-2 border-b border-zinc-100 dark:border-zinc-800/60 bg-zinc-50/60 dark:bg-zinc-900/20 shrink-0 flex-wrap">
-                <FilterChip label="Job title" activeLabel={db.filters.title}   options={titles}
-                  onSelect={(v) => db.setFilter("title", v)}   onClear={() => db.setFilter("title", "")} />
-                <AgeRangeChip
-                  value={db.ageFilter}
-                  onChange={db.onAgeChange}
-                  globalMin={db.ageRange.min}
-                  globalMax={db.ageRange.max}
+            <div className="topbar-right">
+              <div className="topbar-search">
+                <I.Search size={13} />
+                <input
+                  type="text"
+                  placeholder="Search name, email, username…"
+                  value={db.filters.q}
+                  onChange={(e) => db.setFilter("q", e.target.value)}
                 />
-                <FilterChip label="Country" activeLabel={db.filters.country} options={countries}
-                  onSelect={(v) => db.setFilter("country", v)} onClear={() => db.setFilter("country", "")} />
-                <FilterChip label="State"   activeLabel={db.filters.state}   options={states}
-                  onSelect={(v) => db.setFilter("state", v)}   onClear={() => db.setFilter("state", "")} />
+                {db.filters.q && (
+                  <button
+                    type="button"
+                    className="ds-icon-btn"
+                    onClick={() => db.setFilter("q", "")}
+                    title="Clear"
+                  >
+                    <I.X size={11} />
+                  </button>
+                )}
+                {!db.filters.q && <span className="ds-kbd">/</span>}
               </div>
-            )}
+              <button type="button" className="ds-btn-ghost" title="Export CSV (coming soon)">
+                <I.Download size={12} />
+                Export
+              </button>
+              <button
+                type="button"
+                className="ds-icon-btn"
+                title="Toggle theme"
+                onClick={() => {
+                  const html = document.documentElement;
+                  const next = html.dataset.theme === "dark" ? "light" : "dark";
+                  html.dataset.theme = next;
+                }}
+              >
+                <I.Moon size={13} />
+              </button>
+              <button type="button" className="ds-btn-primary">
+                <I.Plus size={12} />
+                Invite
+              </button>
+            </div>
+          </div>
 
-            {/* Stats */}
-            <StatsCards stats={db.stats} />
-
-            {/* Charts strip */}
-            {db.showCharts && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-px bg-zinc-200 dark:bg-zinc-800 border-b border-zinc-200 dark:border-zinc-800 shrink-0">
-                {[
-                  { title: "Role distribution", content: <RoleDonut users={db.filtered} /> },
-                  { title: "Gender balance",    content: <GenderBreakdown users={db.filtered} /> },
-                  { title: "Age distribution",  content: <AgeHistogram users={db.filtered} /> },
-                  { title: "Departments",       content: <DeptBar users={db.filtered} maxItems={6} /> },
-                ].map(({ title, content }) => (
-                  <div key={title} className="bg-white dark:bg-zinc-900 p-3.5">
-                    <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-3">
-                      {title}
-                    </p>
-                    {content}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* List header */}
-            <div className="flex items-center justify-between px-4 sm:px-5 py-2 border-b border-zinc-200 dark:border-zinc-800 shrink-0">
-              <span className="text-[13px] text-zinc-400 dark:text-zinc-500">
-                <strong className="text-zinc-600 dark:text-zinc-300 font-medium">{db.filtered.length}</strong>
-                <span className="hidden sm:inline"> users</span>
-              </span>
-              <div className="flex items-center gap-1.5 text-[13px] text-zinc-400 dark:text-zinc-500">
-                <span className="hidden sm:inline">Sort:</span>
-                <select
-                  value={db.sort}
-                  onChange={(e) => { db.setSort(e.target.value as Parameters<typeof db.setSort>[0]); db.setPage(1); }}
-                  className="border-none bg-transparent text-[13px] text-zinc-600 dark:text-zinc-300 cursor-pointer outline-none font-medium"
+          {/* Filter bar */}
+          <div className="filterbar">
+            <div className="view-tabs">
+              {(
+                [
+                  { id: "all", label: "All", count: counts.all },
+                  { id: "admin", label: "Admins", count: counts.admin },
+                  { id: "moderator", label: "Mods", count: counts.moderator },
+                  { id: "female", label: "Female", count: counts.female },
+                  { id: "male", label: "Male", count: counts.male },
+                ] as Array<{ id: Tab; label: string; count: number }>
+              ).map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  className={"view-tab" + (tab === t.id ? " active" : "")}
+                  onClick={() => setTab(t.id)}
                 >
-                  <option value="firstName">First name A→Z</option>
-                  <option value="lastName">Last name A→Z</option>
-                  <option value="age">Age ↑</option>
-                  <option value="dept">Department</option>
-                </select>
+                  {t.label}
+                  <span className="view-tab-dot">{t.count}</span>
+                </button>
+              ))}
+            </div>
+            <div className="filter-divider" />
+            <FilterChip
+              label="Role"
+              value={db.filters.role}
+              options={[
+                { value: "admin", label: "Admin" },
+                { value: "moderator", label: "Moderator" },
+                { value: "user", label: "User" },
+              ]}
+              onSelect={(v) => db.setFilter("role", v)}
+              onClear={() => db.setFilter("role", "")}
+            />
+            <FilterChip
+              label="Department"
+              value={db.filters.department}
+              options={departments.map((d) => ({ value: d, label: d }))}
+              onSelect={(v) => db.setFilter("department", v)}
+              onClear={() => db.setFilter("department", "")}
+              searchable
+            />
+            <FilterChip
+              label="Gender"
+              value={db.filters.gender}
+              options={[
+                { value: "female", label: "Female" },
+                { value: "male", label: "Male" },
+              ]}
+              onSelect={(v) => db.setFilter("gender", v)}
+              onClear={() => db.setFilter("gender", "")}
+            />
+            <FilterChip
+              label="Title"
+              value={db.filters.title}
+              options={titles.map((t) => ({ value: t, label: t }))}
+              onSelect={(v) => db.setFilter("title", v)}
+              onClear={() => db.setFilter("title", "")}
+              searchable
+            />
+            <FilterChip
+              label="Country"
+              value={db.filters.country}
+              options={countries.map((c) => ({ value: c, label: c }))}
+              onSelect={(v) => db.setFilter("country", v)}
+              onClear={() => db.setFilter("country", "")}
+              searchable
+            />
+            <FilterChip
+              label="State"
+              value={db.filters.state}
+              options={states.map((s) => ({ value: s, label: s }))}
+              onSelect={(v) => db.setFilter("state", v)}
+              onClear={() => db.setFilter("state", "")}
+              searchable
+            />
+            {db.hasFilters && (
+              <button
+                type="button"
+                className="ds-btn-ghost"
+                onClick={() => {
+                  db.clear();
+                  setActiveSavedId(null);
+                }}
+              >
+                Reset
+              </button>
+            )}
+            <div className="filter-spacer" />
+            <button type="button" className="ds-btn-outline" style={{ whiteSpace: "nowrap" }}>
+              <I.Star size={11} />
+              Save view
+            </button>
+          </div>
+
+          {/* Charts strip */}
+          <div className="charts-strip">
+            <div className="chart-card">
+              <div className="chart-label">Total · filtered</div>
+              <div className="chart-value">
+                {tabFiltered.length}
+                <span className="chart-value-sub">/ {users.length}</span>
               </div>
             </div>
-
-            {/* ── User list ── */}
-            <div className="flex-1 overflow-y-auto">
-              {db.filtered.length === 0 ? (
-                <div className="flex items-center justify-center h-full text-[13px] text-zinc-400">
-                  No users found
+            <div className="chart-card">
+              <div className="chart-label">Admins</div>
+              <div className="chart-value">
+                {tabFiltered.filter((u) => u.role === "admin").length}
+                <span className="chart-value-sub">{total ? Math.round((tabFiltered.filter((u) => u.role === "admin").length / total) * 100) : 0}%</span>
+              </div>
+            </div>
+            <div className="chart-card">
+              <div className="chart-label">Avg age · top dept</div>
+              <div className="chart-value" style={{ fontSize: 14 }}>
+                {avgAge} y
+                <span className="chart-value-sub" style={{ marginLeft: 8 }}>·</span>
+                <span className="chart-value-sub" style={{ marginLeft: 4, color: "var(--fg-secondary)" }}>
+                  {topDept[0]}
+                </span>
+              </div>
+            </div>
+            <div className="chart-card">
+              <div className="chart-label">Gender · age dist</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                  {fPct}
+                  <span style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>%F</span>
                 </div>
-              ) : isMobile ? (
-                /* ─ Mobile: infinite scroll ─ */
-                <>
-                  <ul className={db.view === "grid"
-                    ? "grid grid-cols-1 gap-2.5 p-4"
-                    : "divide-y divide-zinc-100 dark:divide-zinc-800"
-                  }>
-                    {mobileUsers.map((u) =>
-                      db.view === "grid" ? (
-                        <li key={u.id}>
-                          <UserCard user={u} selected={db.selected?.id === u.id} onClick={() => db.toggleSelected(u)} />
-                        </li>
-                      ) : (
-                        <li key={u.id}>
-                          <UserRow user={u} selected={db.selected?.id === u.id} onClick={() => db.toggleSelected(u)} />
-                        </li>
-                      ),
-                    )}
-                  </ul>
-                  {/* Sentinel — triggers next batch when visible */}
-                  {hasMoreItems && <div ref={sentinelRef} className="h-10" />}
-                  {/* End-of-list indicator */}
-                  {!hasMoreItems && mobileUsers.length > 0 && (
-                    <p className="text-center text-[13px] text-zinc-400 py-5">
-                      All {db.filtered.length} users loaded
-                    </p>
-                  )}
-                </>
+                <svg width="80" height="22" viewBox="0 0 80 22" aria-hidden>
+                  {buckets.map((b, i) => (
+                    <rect
+                      key={i}
+                      x={i * 16 + 1}
+                      y={22 - (b / maxB) * 20}
+                      width="14"
+                      height={(b / maxB) * 20}
+                      rx="1.5"
+                      fill="var(--accent)"
+                      opacity={0.35 + (b / maxB) * 0.55}
+                    />
+                  ))}
+                </svg>
+              </div>
+            </div>
+          </div>
+
+          {/* Table + side panel */}
+          <div className="table-wrap">
+            <div className="table-scroll">
+              {tabFiltered.length === 0 ? (
+                <div style={{ padding: "60px 24px", textAlign: "center", color: "var(--fg-tertiary)" }}>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: "var(--fg-secondary)" }}>
+                    No users match these filters
+                  </div>
+                  <div style={{ fontSize: 12.5, marginTop: 4 }}>
+                    Try clearing filters or adjusting search.
+                  </div>
+                  <button
+                    type="button"
+                    className="ds-btn-outline"
+                    onClick={() => {
+                      db.clear();
+                      setActiveSavedId(null);
+                      setTab("all");
+                    }}
+                    style={{ marginTop: 14 }}
+                  >
+                    Clear filters
+                  </button>
+                </div>
               ) : (
-                /* ─ Desktop: pagination ─ */
-                db.view === "grid" ? (
-                  <ul className="grid grid-cols-2 gap-2.5 p-5">
-                    {db.pageUsers.map((u) => (
-                      <li key={u.id}>
-                        <UserCard user={u} selected={db.selected?.id === u.id} onClick={() => db.toggleSelected(u)} />
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <ul className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                    {db.pageUsers.map((u) => (
-                      <li key={u.id}>
-                        <UserRow user={u} selected={db.selected?.id === u.id} onClick={() => db.toggleSelected(u)} />
-                      </li>
-                    ))}
-                  </ul>
-                )
+                <UserTable
+                  users={tabFiltered}
+                  sort={tableSort}
+                  onSort={onTableSort}
+                  selectedIds={selectedIds}
+                  onToggleSelect={toggleSelect}
+                  onToggleAll={toggleAll}
+                  cursorId={cursorId}
+                  onOpen={(u) => {
+                    db.setSelected(u);
+                    setCursorId(u.id);
+                  }}
+                />
               )}
             </div>
-
-            {/* Pagination — desktop only */}
-            {!isMobile && (
-              <div className="flex items-center justify-between px-5 py-2.5 border-t border-zinc-200 dark:border-zinc-800 shrink-0">
-                <span className="text-[13px] text-zinc-400">
-                  Page {db.safePage} of {db.totalPages}
-                </span>
-                <Pagination page={db.safePage} totalPages={db.totalPages} onChange={db.setPage} />
-              </div>
+            {db.selected && (
+              <SidePanel
+                user={db.selected}
+                onClose={() => db.setSelected(null)}
+                onNext={onNext}
+                onPrev={onPrev}
+              />
             )}
           </div>
+
+          {/* Status bar */}
+          <div className="statusbar">
+            <span>
+              <span className="dot" />
+              Synced just now
+            </span>
+            <span>
+              Showing <b style={{ color: "var(--fg-secondary)" }}>{tabFiltered.length}</b> of {users.length}
+            </span>
+            {db.hasFilters && (
+              <span style={{ color: "var(--accent-fg)" }}>
+                {Object.values(db.filters).filter((v) => v).length + (db.ageFilter ? 1 : 0)} filter
+                {Object.values(db.filters).filter((v) => v).length + (db.ageFilter ? 1 : 0) > 1 ? "s" : ""} active
+              </span>
+            )}
+            <span className="spacer" />
+            <span>
+              <kbd>↑↓</kbd> nav
+            </span>
+            <span>
+              <kbd>↵</kbd> open
+            </span>
+            <span>
+              <kbd>esc</kbd> close
+            </span>
+          </div>
         </div>
-
-        {/* Modal */}
-        {db.selected && <UserModal user={db.selected} onClose={() => db.setSelected(null)} />}
-
-        {/* Chat assistant */}
-        <ChatWidget />
       </div>
-      </DashboardCtx.Provider>
-    </DarkCtx.Provider>
+
+      {/* Chat assistant — kept as-is on the light app theme */}
+      <ChatWidget />
+    </DashboardCtx.Provider>
   );
 }

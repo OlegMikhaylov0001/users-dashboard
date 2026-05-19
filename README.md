@@ -1,6 +1,6 @@
 # UserBase — Users Dashboard
 
-A responsive admin dashboard for browsing, searching, filtering, and analysing 208 users from the [DummyJSON API](https://dummyjson.com/docs/users). Built with Next.js 16, React 19, TypeScript, and Tailwind CSS v4.
+A responsive admin dashboard for browsing, searching, filtering, and analysing 208 users from the [DummyJSON API](https://dummyjson.com/docs/users). Built with Next.js 16, React 19, TypeScript, and Tailwind CSS v4 — styled in a Linear-inspired design (Manrope + JetBrains Mono, OKLCH color tokens, table-as-default + side panel).
 
 It also ships with a built-in **AI chat assistant** (Anthropic Claude or Google Gemini — switch in settings) that can answer aggregate questions about the dataset *and* drive the dashboard UI via tool calls — ask "show only female moderators" and the filter chips actually change.
 
