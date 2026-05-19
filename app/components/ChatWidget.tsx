@@ -3,12 +3,19 @@
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { DashboardCtx } from "./dashboard-ctx";
 import { ANTHROPIC_TOOLS, executeTool } from "../lib/chatTools";
-import { runChat, type AnthropicContentBlock, type AnthropicMessage } from "../lib/anthropic";
+import { type AnthropicContentBlock, type AnthropicMessage } from "../lib/anthropic";
 import { addUsage, costUsd, EMPTY_USAGE, formatCost, formatTokens, totalTokens, type ChatUsage } from "../lib/pricing";
+import {
+  DEFAULT_KEYS,
+  DEFAULT_PROVIDER,
+  isProviderId,
+  PROVIDER_IDS,
+  PROVIDER_STORAGE_KEY,
+  PROVIDERS,
+  type ProviderId,
+} from "../lib/providers";
 import type { Filters } from "../hooks/useDashboard";
-
-const STORAGE_KEY = "ud_anthropic_key";
-const MODEL = "claude-sonnet-4-6";
+import { I } from "./icons";
 
 interface FiltersSnapshot {
   q: string;
@@ -104,13 +111,13 @@ function helpMessage(): string {
   ].join("\n");
 }
 
-function costMessage(usage: ChatUsage): string {
+function costMessage(usage: ChatUsage, providerLabel: string, pricing: import("../lib/pricing").PricingPerM): string {
   return [
-    `Session usage:`,
+    `Session usage (${providerLabel}):`,
     `  Input tokens:  ${usage.input_tokens.toLocaleString()}`,
     `  Output tokens: ${usage.output_tokens.toLocaleString()}`,
     `  Total:         ${totalTokens(usage).toLocaleString()}`,
-    `  Cost:          ${formatCost(costUsd(usage))}`,
+    `  Cost:          ${formatCost(costUsd(usage, pricing))}`,
   ].join("\n");
 }
 
@@ -151,10 +158,26 @@ function parseSlash(text: string): { handledLocally: true; localText: string } |
 export function ChatWidget() {
   const ctx = useContext(DashboardCtx);
   const [open, setOpen] = useState(false);
-  const [apiKey, setApiKey] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    return window.localStorage.getItem(STORAGE_KEY);
+  const [provider, setProvider] = useState<ProviderId>(() => {
+    if (typeof window === "undefined") return DEFAULT_PROVIDER;
+    const stored = window.localStorage.getItem(PROVIDER_STORAGE_KEY);
+    return isProviderId(stored) ? stored : DEFAULT_PROVIDER;
   });
+  const [apiKeys, setApiKeys] = useState<Record<ProviderId, string | null>>(() => {
+    if (typeof window === "undefined") return { demo: null, anthropic: null, google: null };
+    return {
+      demo: null, // demo provider doesn't accept a user key
+      anthropic: window.localStorage.getItem(PROVIDERS.anthropic.apiKeyStorageKey),
+      google: window.localStorage.getItem(PROVIDERS.google.apiKeyStorageKey),
+    };
+  });
+  // localStorage takes precedence over bundled default; default is the fallback.
+  // For the keyless demo provider, DEFAULT_KEYS["demo"] holds the Worker URL.
+  const apiKey = apiKeys[provider] || DEFAULT_KEYS[provider] || null;
+  const providerCfg = PROVIDERS[provider];
+  // "default" hint only makes sense for keyed providers; demo isn't really a "key".
+  const usingDefaultKey =
+    providerCfg.requiresKey && !apiKeys[provider] && !!DEFAULT_KEYS[provider];
   const [keyInput, setKeyInput] = useState("");
   const [persistKey, setPersistKey] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -186,18 +209,26 @@ export function ChatWidget() {
   function saveKey() {
     const trimmed = keyInput.trim();
     if (!trimmed) return;
-    setApiKey(trimmed);
+    setApiKeys((prev) => ({ ...prev, [provider]: trimmed }));
     if (persistKey && typeof window !== "undefined") {
-      window.localStorage.setItem(STORAGE_KEY, trimmed);
+      window.localStorage.setItem(providerCfg.apiKeyStorageKey, trimmed);
     }
     setKeyInput("");
     setSettingsOpen(false);
   }
 
   function forgetKey() {
-    setApiKey(null);
-    if (typeof window !== "undefined") window.localStorage.removeItem(STORAGE_KEY);
+    setApiKeys((prev) => ({ ...prev, [provider]: null }));
+    if (typeof window !== "undefined") window.localStorage.removeItem(providerCfg.apiKeyStorageKey);
     setSettingsOpen(false);
+  }
+
+  function switchProvider(next: ProviderId) {
+    if (next === provider) return;
+    setProvider(next);
+    setKeyInput(""); // avoid accidentally saving the wrong-provider key from the input draft
+    setError(null);
+    if (typeof window !== "undefined") window.localStorage.setItem(PROVIDER_STORAGE_KEY, next);
   }
 
   function resetChat() {
@@ -243,7 +274,11 @@ export function ChatWidget() {
           return;
         }
         if (slash.localText === "__cost__") {
-          setTurns((t) => [...t, { role: "user", text: rawText.trim() }, { role: "system", text: costMessage(usage) }]);
+          setTurns((t) => [
+            ...t,
+            { role: "user", text: rawText.trim() },
+            { role: "system", text: costMessage(usage, providerCfg.shortLabel, providerCfg.pricing) },
+          ]);
           setInput("");
           return;
         }
@@ -255,7 +290,11 @@ export function ChatWidget() {
     }
 
     if (!apiKey) {
-      setError("Anthropic API key required — open settings.");
+      setError(
+        providerCfg.requiresKey
+          ? `${providerCfg.shortLabel} API key required — open settings.`
+          : `Demo endpoint not configured (NEXT_PUBLIC_DEMO_WORKER_URL).`,
+      );
       return;
     }
 
@@ -277,9 +316,9 @@ export function ChatWidget() {
     try {
       const snapshot = ctx.getCurrentFilters();
       const system = buildSystem(ctx.users.length, snapshot);
-      const { finalText, usage: runUsage } = await runChat({
+      const { finalText, usage: runUsage } = await providerCfg.runChat({
         apiKey,
-        model: MODEL,
+        model: providerCfg.defaultModel,
         system,
         messages: baseMessages,
         tools: ANTHROPIC_TOOLS,
@@ -354,7 +393,9 @@ export function ChatWidget() {
 
   if (!ctx) return null;
 
-  const needsKey = !apiKey || settingsOpen;
+  // Open the settings dialog automatically when the current provider needs a key
+  // and we don't have one (saved or default). Keyless demo provider skips this.
+  const needsKey = (providerCfg.requiresKey && !apiKey) || settingsOpen;
 
   return (
     <>
@@ -383,11 +424,26 @@ export function ChatWidget() {
             <div className="w-7 h-7 rounded-full bg-[#185FA5] text-white flex items-center justify-center text-[12px] font-semibold">AI</div>
             <div className="flex-1 min-w-0">
               <p className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-100 truncate">Ask about these users</p>
-              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate" title={`${ctx.users.length} users · ${MODEL}`}>
-                {ctx.users.length} users · {MODEL}
+              <p
+                className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate flex items-center gap-1"
+                title={`${ctx.users.length} users · ${providerCfg.defaultModel} (${providerCfg.shortLabel})`}
+              >
+                <span>{ctx.users.length} users</span>
+                <span>·</span>
+                <button
+                  type="button"
+                  onClick={() => setSettingsOpen(true)}
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 -my-0.5 rounded text-[11px] font-medium text-zinc-600 dark:text-zinc-300 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors"
+                  title="Switch provider"
+                >
+                  {providerCfg.shortLabel}
+                  <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <path d="M4 6l4 4 4-4" />
+                  </svg>
+                </button>
                 {totalTokens(usage) > 0 && (
-                  <span title="Session tokens / cost">
-                    {" · "}{formatTokens(totalTokens(usage))} tok · {formatCost(costUsd(usage))}
+                  <span title={`Session tokens / cost (${providerCfg.pricingNote})`}>
+                    · {formatTokens(totalTokens(usage))} tok · {formatCost(costUsd(usage, providerCfg.pricing))}
                   </span>
                 )}
               </p>
@@ -397,11 +453,9 @@ export function ChatWidget() {
               onClick={() => setSettingsOpen((v) => !v)}
               className="w-7 h-7 flex items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
               aria-label="Settings"
+              title="Settings"
             >
-              <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <circle cx="8" cy="8" r="2" />
-                <path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3" />
-              </svg>
+              <I.Settings size={14} />
             </button>
             <button
               type="button"
@@ -417,35 +471,93 @@ export function ChatWidget() {
 
           {needsKey ? (
             <div className="flex-1 overflow-y-auto px-4 py-4 text-[13px] text-zinc-700 dark:text-zinc-300">
-              <p className="font-semibold mb-1">Anthropic API key</p>
-              <p className="text-[12px] text-zinc-500 dark:text-zinc-400 mb-3">
-                Demo only — your key, your bill. The request goes directly from your browser to{" "}
-                <a className="underline" href="https://console.anthropic.com/" target="_blank" rel="noreferrer">
-                  console.anthropic.com
-                </a>
-                .
-              </p>
-              <input
-                type="password"
-                value={keyInput}
-                onChange={(e) => setKeyInput(e.target.value)}
-                placeholder="sk-ant-..."
-                className="w-full h-9 px-3 border border-zinc-200 dark:border-zinc-700 rounded-lg bg-zinc-50 dark:bg-zinc-800 text-[13px] placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-[#185FA5]/30 focus:border-[#185FA5]"
-              />
-              <label className="flex items-center gap-2 mt-2 text-[12px] text-zinc-500 dark:text-zinc-400">
-                <input type="checkbox" checked={persistKey} onChange={(e) => setPersistKey(e.target.checked)} />
-                Remember in this browser (localStorage)
-              </label>
+              <p className="font-semibold mb-2">Provider</p>
+              <div className="flex flex-col gap-1 mb-4">
+                {PROVIDER_IDS.map((id) => {
+                  const p = PROVIDERS[id];
+                  const savedKey = Boolean(apiKeys[id]);
+                  const defaultKey = Boolean(DEFAULT_KEYS[id]);
+                  let badge: { text: string; color: string };
+                  if (!p.requiresKey) badge = { text: "free demo", color: "text-emerald-600 dark:text-emerald-400" };
+                  else if (savedKey) badge = { text: "your key", color: "text-green-600 dark:text-green-400" };
+                  else if (defaultKey) badge = { text: "default", color: "text-[#6F50D9] dark:text-[#9b85e8]" };
+                  else badge = { text: "no key", color: "text-zinc-400" };
+                  return (
+                    <label
+                      key={id}
+                      className={`flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer border ${
+                        provider === id
+                          ? "border-[#6F50D9] bg-[#6F50D9]/5"
+                          : "border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="provider"
+                        checked={provider === id}
+                        onChange={() => switchProvider(id)}
+                        className="cursor-pointer"
+                      />
+                      <span className="flex-1 text-[13px]">{p.label}</span>
+                      <span className={`text-[10px] uppercase tracking-wider font-semibold ${badge.color}`}>
+                        {badge.text}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+
+              {providerCfg.requiresKey ? (
+                <>
+                  <p className="font-semibold mb-1">{providerCfg.shortLabel} API key</p>
+                  <p className="text-[12px] text-zinc-500 dark:text-zinc-400 mb-3">
+                    {providerCfg.pricingNote} The request goes directly from your browser to{" "}
+                    <a className="underline" href={providerCfg.apiKeyConsoleUrl} target="_blank" rel="noreferrer">
+                      {providerCfg.apiKeyConsoleLabel}
+                    </a>
+                    .
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="font-semibold mb-1">Free demo — no key needed</p>
+                  <p className="text-[12px] text-zinc-500 dark:text-zinc-400 mb-3">
+                    {providerCfg.pricingNote} Switch to Claude or Gemini if you need a higher quota or specific model.
+                  </p>
+                </>
+              )}
+              {usingDefaultKey && (
+                <p className="text-[12px] text-[#6F50D9] dark:text-[#9b85e8] mb-3 bg-[#6F50D9]/5 border border-[#6F50D9]/20 rounded-lg px-2.5 py-1.5">
+                  Currently using the bundled default key. Paste your own below to override (saved in localStorage, takes precedence).
+                </p>
+              )}
+              {providerCfg.requiresKey && (
+                <input
+                  type="password"
+                  value={keyInput}
+                  onChange={(e) => setKeyInput(e.target.value)}
+                  placeholder={providerCfg.apiKeyPlaceholder}
+                  className="w-full h-9 px-3 border border-zinc-200 dark:border-zinc-700 rounded-lg bg-zinc-50 dark:bg-zinc-800 text-[13px] placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-[#185FA5]/30 focus:border-[#185FA5]"
+                />
+              )}
+              {providerCfg.requiresKey && (
+                <label className="flex items-center gap-2 mt-2 text-[12px] text-zinc-500 dark:text-zinc-400">
+                  <input type="checkbox" checked={persistKey} onChange={(e) => setPersistKey(e.target.checked)} />
+                  Remember in this browser (localStorage)
+                </label>
+              )}
               <div className="flex gap-2 mt-3">
-                <button
-                  type="button"
-                  onClick={saveKey}
-                  disabled={!keyInput.trim()}
-                  className="px-3 py-1.5 rounded-lg bg-[#185FA5] hover:bg-[#144d85] disabled:opacity-50 text-white text-[13px] font-medium transition-colors"
-                >
-                  Save
-                </button>
-                {apiKey && (
+                {providerCfg.requiresKey && (
+                  <button
+                    type="button"
+                    onClick={saveKey}
+                    disabled={!keyInput.trim()}
+                    className="px-3 py-1.5 rounded-lg bg-[#185FA5] hover:bg-[#144d85] disabled:opacity-50 text-white text-[13px] font-medium transition-colors"
+                  >
+                    Save
+                  </button>
+                )}
+                {providerCfg.requiresKey && apiKeys[provider] && (
                   <button
                     type="button"
                     onClick={forgetKey}
@@ -566,11 +678,44 @@ export function ChatWidget() {
                     </div>
                   </div>
                 )}
-                {error && (
-                  <div className="bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900 rounded-lg px-3 py-2 text-[12px]">
-                    {error}
-                  </div>
-                )}
+                {error && (() => {
+                  const isDemoLimit = error.toLowerCase().includes("demo limit");
+                  return (
+                    <div className={
+                      isDemoLimit
+                        ? "bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200 border border-amber-200 dark:border-amber-900 rounded-lg px-3 py-2 text-[12px] space-y-2"
+                        : "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900 rounded-lg px-3 py-2 text-[12px]"
+                    }>
+                      <div>{error}</div>
+                      {isDemoLimit && (
+                        <div className="flex gap-1.5 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setError(null);
+                              setSettingsOpen(true);
+                              switchProvider("anthropic");
+                            }}
+                            className="px-2 py-0.5 rounded border border-amber-300 dark:border-amber-800 text-[11px] font-medium hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors"
+                          >
+                            Use my Claude key
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setError(null);
+                              setSettingsOpen(true);
+                              switchProvider("google");
+                            }}
+                            className="px-2 py-0.5 rounded border border-amber-300 dark:border-amber-800 text-[11px] font-medium hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors"
+                          >
+                            Use my Gemini key
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
 
               {turns.length === 0 && (
