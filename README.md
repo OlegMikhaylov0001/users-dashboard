@@ -241,6 +241,22 @@ app/
 
 The selected provider is persisted under `ud_provider`. Both keys can coexist — switching providers in the dialog doesn't lose either one. To forget a key: pick its provider, click gear → "Forget current key", or run `localStorage.removeItem("ud_anthropic_key")` / `removeItem("ud_google_key")` in the console.
 
+### Bundling a default key (optional)
+
+The chat can ship with a pre-filled key so visitors don't have to bring their own. Open `app/lib/providers.ts` and paste a key into `DEFAULT_GEMINI_KEY`:
+
+```ts
+export const DEFAULT_GEMINI_KEY = "AIzaSy...";  // your Google AI Studio key
+```
+
+When this constant is non-empty:
+- It becomes the fallback for the Google provider when there's no `localStorage` key.
+- The chat header shows a **default** badge next to the provider name.
+- The default provider on first load switches from Anthropic to Google.
+- Users can still override by pasting their own key in settings (saved key always wins).
+
+**Security caveat:** the constant is bundled into the public JS, so anyone with browser devtools can read it. Use a **Gemini free-tier key only** — abuse caps out at quota exhaustion (250 req/day, 10 req/min), not a bill. `DEFAULT_ANTHROPIC_KEY` exists for symmetry but **don't use it** unless you accept that scrapers can burn your credit budget.
+
 ### Switching models or adding a provider
 
 - The default model per provider is set in `app/lib/providers.ts` (`defaultModel`).
