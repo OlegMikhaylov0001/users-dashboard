@@ -58,6 +58,67 @@ export const I = {
   ArrowUpRight: makeIcon(<path d="M7 17 17 7M9 7h8v8" />),
   Star: makeIcon(<path d="m12 3 2.7 5.5 6 .9-4.4 4.2 1 6L12 16.7 6.6 19.6l1-6L3.4 9.4l6-.9L12 3Z" />),
   More: makeIcon(<><circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none" /></>),
+
+  /* Chat widget redesign icons */
+  Sparkle: makeIcon(
+    <>
+      <path d="M12 3l1.6 4.5L18 9l-4.4 1.5L12 15l-1.6-4.5L6 9l4.4-1.5L12 3Z" />
+      <path d="M19 15l.7 1.7L21.4 17l-1.7.7L19 19l-.7-1.7L16.6 17l1.7-.6L19 15Z" />
+    </>,
+  ),
+  Stop: makeIcon(<rect x="6" y="6" width="12" height="12" rx="2" />),
+  ArrowRight: makeIcon(<path d="M5 12h14M13 5l7 7-7 7" />),
+  ArrowLeft: makeIcon(<path d="M19 12H5M11 5l-7 7 7 7" />),
+  Undo: makeIcon(<path d="M9 14 4 9l5-5M4 9h11a5 5 0 0 1 0 10h-4" />),
+  Filter: makeIcon(<path d="M3 5h18l-7 9v6l-4-2v-4L3 5Z" />),
+  Trash: makeIcon(
+    <>
+      <path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+      <path d="M6 7v13a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7" />
+    </>,
+  ),
+  User: makeIcon(
+    <>
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 21v-1a8 8 0 0 1 16 0v1" />
+    </>,
+  ),
+  Stats: makeIcon(<path d="M4 20V10M10 20V4M16 20v-7M22 20H2" />),
+  Slash: makeIcon(<path d="M16 4 8 20" />),
+  HelpCircle: makeIcon(
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.5v.7" />
+      <circle cx="12" cy="17" r="0.7" fill="currentColor" />
+    </>,
+  ),
+  Coin: makeIcon(
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M14.5 9.5a3 3 0 1 0 0 5M12 6.5V8M12 16v1.5" />
+    </>,
+  ),
+  Eye: makeIcon(
+    <>
+      <path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="2.5" />
+    </>,
+  ),
+  EyeOff: makeIcon(
+    <>
+      <path d="m3 3 18 18" />
+      <path d="M10.5 6.3A10 10 0 0 1 22 12s-1.5 2.6-4 4.5" />
+      <path d="M6.5 6.5C4 8.2 2 12 2 12s4 7 10 7c1.6 0 3.1-.5 4.4-1.2" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+    </>,
+  ),
+  Warn: makeIcon(
+    <>
+      <path d="M12 3 2 21h20L12 3Z" />
+      <path d="M12 10v5M12 18v0" />
+    </>,
+  ),
+  Refresh: makeIcon(<path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5" />),
 };
 
 export type IconName = keyof typeof I;
