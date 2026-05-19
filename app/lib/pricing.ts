@@ -12,13 +12,27 @@ export const EMPTY_USAGE: ChatUsage = {
   cache_creation_input_tokens: 0,
 };
 
-// Prices per million tokens, current as of 2026-05 for Sonnet 4.x.
-// Update here when switching model — kept central so it can't drift.
-const SONNET_PRICING_PER_M = {
+// Prices per million tokens. Update here when switching model — kept central so it can't drift.
+export interface PricingPerM {
+  input: number;
+  output: number;
+  cache_read?: number;
+  cache_creation?: number;
+}
+
+export const ANTHROPIC_SONNET_46_PRICING: PricingPerM = {
   input: 3,
   output: 15,
   cache_read: 0.3,
-  cache_creation_5m: 3.75,
+  cache_creation: 3.75,
+};
+
+// Gemini 2.5 Flash on the free tier ($0). When the project graduates to paid Google
+// Cloud billing, swap to: { input: 0.30, output: 2.50 }. Free tier limits at the time
+// of writing: ~10 RPM / 250 RPD — fine for dev + low-volume demo usage.
+export const GEMINI_FLASH_25_FREE_PRICING: PricingPerM = {
+  input: 0,
+  output: 0,
 };
 
 export function addUsage(a: ChatUsage, b: Partial<ChatUsage>): ChatUsage {
@@ -34,13 +48,12 @@ export function totalTokens(u: ChatUsage): number {
   return u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
 }
 
-export function costUsd(u: ChatUsage): number {
-  const p = SONNET_PRICING_PER_M;
+export function costUsd(u: ChatUsage, pricing: PricingPerM): number {
   return (
-    (u.input_tokens * p.input +
-      u.output_tokens * p.output +
-      u.cache_read_input_tokens * p.cache_read +
-      u.cache_creation_input_tokens * p.cache_creation_5m) /
+    (u.input_tokens * pricing.input +
+      u.output_tokens * pricing.output +
+      u.cache_read_input_tokens * (pricing.cache_read ?? 0) +
+      u.cache_creation_input_tokens * (pricing.cache_creation ?? 0)) /
     1_000_000
   );
 }

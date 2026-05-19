@@ -1,8 +1,8 @@
 # UserBase — Users Dashboard
 
-A responsive admin dashboard for browsing, searching, filtering, and analysing 208 users from the [DummyJSON API](https://dummyjson.com/docs/users). Built with Next.js 16, React 19, TypeScript, and Tailwind CSS v4.
+A responsive admin dashboard for browsing, searching, filtering, and analysing 208 users from the [DummyJSON API](https://dummyjson.com/docs/users). Built with Next.js 16, React 19, TypeScript, and Tailwind CSS v4 — styled in a Linear-inspired design (Manrope + JetBrains Mono, OKLCH color tokens, table-as-default + side panel).
 
-It also ships with a built-in **AI chat assistant** (`claude-sonnet-4-6`) that can answer aggregate questions about the dataset *and* drive the dashboard UI via tool calls — ask "show only female moderators" and the filter chips actually change.
+It also ships with a built-in **AI chat assistant** (Anthropic Claude or Google Gemini — switch in settings) that can answer aggregate questions about the dataset *and* drive the dashboard UI via tool calls — ask "show only female moderators" and the filter chips actually change.
 
 ---
 
@@ -68,7 +68,15 @@ The main view is a single-page client dashboard. All 208 users are fetched serve
 
 ### AI chat assistant (`/`, floating widget)
 
-A floating action button in the bottom-right corner opens a chat panel ("Ask about these users"). The agent uses Anthropic's `claude-sonnet-4-6` with five tools:
+A floating action button in the bottom-right corner opens a chat panel ("Ask about these users"). The agent supports **three providers** (chosen in the settings dialog):
+
+| Provider | Default model | Pricing | When to use |
+|---|---|---|---|
+| **Demo** (when configured) | `llama-3.3-70b:free` via OpenRouter | Free — shared proxy, ~10 req/min, 50/day per IP | Visitors who don't want to provision a key. Default when set up. |
+| Anthropic | `claude-sonnet-4-6` | Paid — your key, your bill | Production-quality answers, complex multi-step reasoning |
+| Google | `gemini-2.5-flash` | Free tier (~10 req/min, 250/day) | Dev, demos, smoke-testing without burning tokens |
+
+All three providers route through the same five tools:
 
 | Tool | What it does |
 |---|---|
@@ -128,16 +136,55 @@ The standard pattern of two stacked `<input type="range" class="opacity-0">` ele
 
 A right-side detail panel that slides out when you click a list item is a common pattern, but it reads as "selection" rather than "detail" — the user clicked something and expected to go somewhere, not have a panel appear beside them. A centred overlay with a backdrop is unambiguous: you opened something, you close it with `Esc` or the backdrop.
 
-### Why the chat assistant calls Anthropic directly from the browser
+### Demo provider — shared OpenRouter proxy via Cloudflare Worker
 
-The dashboard is published as a static export (`output: "export"` in `next.config.ts`) so it can be hosted on GitHub Pages — there is no Node server at runtime, so there is no API route that could hold an Anthropic key.
+The demo provider exists so a casual visitor can try the chat without signing up for any LLM service. It routes through a small Cloudflare Worker (~150 lines in `worker/src/index.ts`) that:
+
+```
+Browser (GitHub Pages)        Cloudflare Worker             OpenRouter
+─────────────────────         ──────────────────            ──────────────
+POST /chat               ──→  + Bearer key from env  ──→   :free model
+{messages, tools}             + per-IP rate limit          (Gemini Flash,
+                              + origin allowlist           Llama 3.3, etc)
+                         ←──  + CORS headers          ←──
+```
+
+- The OpenRouter key lives **only** in the Worker's environment (`wrangler secret put`). It never enters the dashboard bundle, never enters git.
+- Per-IP rate limit (10 req/min, 50/day, both adjustable in `wrangler.toml`) caps abuse at quota exhaustion — not a bill.
+- Free OpenRouter models: an **ordered fallback chain** in `wrangler.toml` (`MODELS`, comma-separated). The Worker tries them in sequence — on upstream 429 (provider-side rate-limit, common on `:free` tier) it transparently falls through to the next. The actual model used per request is reported in the `x-served-by-model` response header. Default chain starts with Llama 3.3 70B and falls back to Qwen 3 80B, GPT-OSS 120B, GLM 4.5. List of candidates: [openrouter.ai/models?supported_parameters=tools&max_price=0](https://openrouter.ai/models?supported_parameters=tools&max_price=0).
+- On `429`, the chat surfaces an inline "use my Claude/Gemini key" CTA that hot-swaps the provider.
+
+See `worker/README.md` for the full Cloudflare setup (5 commands, ~10 minutes). On the dashboard side, set:
+
+```bash
+# .env.local (dev)
+NEXT_PUBLIC_DEMO_WORKER_URL=https://users-dashboard-chat.<your-name>.workers.dev/chat
+```
+
+…and add the same as a repo variable in GitHub Actions for production builds.
+
+### Why three providers behind one interface
+
+The chat ships with **Anthropic**, **Google**, and an optional **demo** (OpenRouter via Cloudflare Worker) behind a small registry (`app/lib/providers.ts`). The registry exposes a `runChat` function with an identical signature for every provider; the message format, tool schemas, and `ChatUsage` shape are normalised, and each provider's adapter translates to its native wire format (Anthropic Messages API for Claude, `generativelanguage.googleapis.com/v1beta` for Gemini, OpenAI Chat Completions for OpenRouter).
+
+Three reasons for the split:
+
+1. **Dev cost** — Gemini 2.5 Flash is free up to 250 requests/day. Day-to-day testing of new tools, slash commands, and the agent loop no longer burns Anthropic credits.
+2. **Portability** — adding GPT-4 / Mistral / DeepSeek in future is a single new adapter file plus one entry in the registry. The UI, cost meter, slash commands, and tool executor are provider-agnostic.
+3. **Portfolio signal** — multi-provider thinking with a normalised internal format is a senior pattern (LangChain / Vercel AI SDK do something similar). It also gives a natural foundation for **model routing** (cheap classifier picks the provider per query) in a future PR.
+
+The Anthropic adapter posts JSON to `api.anthropic.com/v1/messages` with `anthropic-dangerous-direct-browser-access: true`. The Gemini adapter posts to `generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key=...`; it also strips JSON Schema keywords Gemini rejects (`additionalProperties`, `$schema`, `default`) and maintains a tool-call-id → name map so cross-provider message history round-trips cleanly.
+
+### Why the chat assistant calls the LLM directly from the browser
+
+The dashboard is published as a static export (`output: "export"` in `next.config.ts`) so it can be hosted on GitHub Pages — there is no Node server at runtime, so there is no API route that could hold an API key.
 
 Two options exist:
 
-1. **Direct browser → `api.anthropic.com` calls** with the `anthropic-dangerous-direct-browser-access: true` header. The user pastes their own API key into the settings dialog; it lives in `localStorage` under `ud_anthropic_key` and never leaves the browser.
+1. **Direct browser → provider calls.** The user pastes their own API key into the settings dialog; it lives in `localStorage` (`ud_anthropic_key` / `ud_google_key`) and never leaves the browser.
 2. A Cloudflare Worker / Vercel Edge function as a proxy with the key in `env`.
 
-Option 1 is shipped because it keeps the project a true static site and lets reviewers try the chat with their own key without provisioning a separate service. The settings dialog states "Demo only — your key, your bill" so the trade-off is explicit. For a publicly shared deployment, swap in option 2.
+Option 1 is shipped because it keeps the project a true static site and lets reviewers try the chat with their own key without provisioning a separate service. The settings dialog states the cost trade-off per provider so it is explicit. For a publicly shared deployment, swap in option 2.
 
 ### Why a React Context for tool execution
 
@@ -156,7 +203,11 @@ app/
 │   ├── palette.ts          # deterministic colour palette for avatars/chips
 │   ├── users.ts            # getFilterOptions (extract unique depts, countries…)
 │   ├── anthropic.ts        # Anthropic Messages API client + tool-use agent loop
-│   └── chatTools.ts        # tool schemas + executor (stats/query/apply/clear/open)
+│   ├── gemini.ts           # Google Gemini API client + tool-use agent loop
+│   ├── openrouter.ts       # OpenAI-format client targeting our Cloudflare Worker (demo)
+│   ├── providers.ts        # registry — selects runChat impl + pricing per provider id
+│   ├── pricing.ts          # per-provider token pricing tables + cost helpers
+│   └── chatTools.ts        # tool schemas (zod) + executor (stats/query/apply/clear/open)
 ├── components/
 │   ├── Dashboard.tsx       # layout shell — wires hooks to child components
 │   ├── Sidebar.tsx         # nav drawer
@@ -212,16 +263,36 @@ app/
 
 1. `npm run dev`, open `http://localhost:3000`.
 2. Click the blue chat button in the bottom-right corner.
-3. Paste an Anthropic API key (`sk-ant-...`) into the settings dialog. Get one at [console.anthropic.com](https://console.anthropic.com/). The key is stored in `localStorage` under `ud_anthropic_key`.
+3. In the settings dialog pick a provider:
+   - **Demo (no key — free tier)** — shows up only when `NEXT_PUBLIC_DEMO_WORKER_URL` is configured. Uses the project's Cloudflare Worker proxy to OpenRouter free models. Rate-limited per IP (10/min, 50/day). See `worker/README.md` for the Cloudflare side.
+   - **Anthropic (Claude)** — paid; get a key at [console.anthropic.com](https://console.anthropic.com/) (`sk-ant-...`). Stored in `localStorage` under `ud_anthropic_key`.
+   - **Google (Gemini, free tier)** — free up to ~10 RPM / 250 RPD; get a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (`AIzaSy...`). Stored under `ud_google_key`.
 4. Ask anything — "show only female moderators", "top 5 countries among admins", "open the card of Ava Taylor".
 
-To forget the key: click the gear icon in the chat header → "Forget current key", or run `localStorage.removeItem("ud_anthropic_key")` in the browser console.
+The selected provider is persisted under `ud_provider`. Both keys can coexist — switching providers in the dialog doesn't lose either one. To forget a key: pick its provider, click gear → "Forget current key", or run `localStorage.removeItem("ud_anthropic_key")` / `removeItem("ud_google_key")` in the console.
 
-### Switching models or expanding tools
+### Bundling a default key (optional)
 
-- The model is hard-coded in `app/components/ChatWidget.tsx` (`const MODEL = "claude-sonnet-4-6"`).
-- Tools live in `app/lib/chatTools.ts`. Each tool has a JSON schema + a local executor that operates on the in-memory `users` array and the dashboard actions exposed through `DashboardCtx`. Adding a new tool is one schema entry + one switch case in `executeTool`.
-- The agent loop is in `app/lib/anthropic.ts` — up to 6 tool-use iterations per turn, then it returns the final assistant text.
+The chat can ship with a pre-filled key so visitors don't have to bring their own. Open `app/lib/providers.ts` and paste a key into `DEFAULT_GEMINI_KEY`:
+
+```ts
+export const DEFAULT_GEMINI_KEY = "AIzaSy...";  // your Google AI Studio key
+```
+
+When this constant is non-empty:
+- It becomes the fallback for the Google provider when there's no `localStorage` key.
+- The chat header shows a **default** badge next to the provider name.
+- The default provider on first load switches from Anthropic to Google.
+- Users can still override by pasting their own key in settings (saved key always wins).
+
+**Security caveat:** the constant is bundled into the public JS, so anyone with browser devtools can read it. Use a **Gemini free-tier key only** — abuse caps out at quota exhaustion (250 req/day, 10 req/min), not a bill. `DEFAULT_ANTHROPIC_KEY` exists for symmetry but **don't use it** unless you accept that scrapers can burn your credit budget.
+
+### Switching models or adding a provider
+
+- The default model per provider is set in `app/lib/providers.ts` (`defaultModel`).
+- Adding a new provider is a single adapter file (export `runChat` matching the `RunChatParams` / `RunChatResult` types from `anthropic.ts`) + one entry in the `PROVIDERS` registry. The UI, cost meter, slash commands, and `executeTool` need no changes.
+- Tools live in `app/lib/chatTools.ts`. Each tool has a zod schema + a local executor that operates on the in-memory `users` array and the dashboard actions exposed through `DashboardCtx`. Adding a new tool is one schema + one switch case in `executeTool`.
+- The agent loop lives in `app/lib/anthropic.ts` (and `gemini.ts`) — up to 6 tool-use iterations per turn, then it returns the final assistant text and aggregated `ChatUsage`.
 
 ### Hosting with a real backend
 
