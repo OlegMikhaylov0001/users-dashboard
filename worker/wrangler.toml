@@ -32,10 +32,13 @@ DEFAULT_MODEL = "google/gemini-2.0-flash-exp:free"
 MAX_RPM = "10"
 MAX_RPD = "50"
 
-# After `wrangler kv namespace create RATE_LIMIT_KV`, paste the printed id below.
+# KV namespace for per-IP rate limit counters.
+# To use your own instead of the project default: run
+#   wrangler kv namespace create RATE_LIMIT_KV
+# and replace `id` below with the printed value.
 [[kv_namespaces]]
 binding = "RATE_LIMIT_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "b0c342818fac4324b013235c88629875"
 
 # Secrets are NOT defined here — they are uploaded via `wrangler secret put`.
 # Required secrets:
