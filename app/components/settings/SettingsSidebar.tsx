@@ -76,7 +76,7 @@ interface Props {
 export function SettingsSidebar({ active, onChange }: Props) {
   return (
     <aside className="set-sidebar">
-      <div className="set-sidebar-head">
+      <Link href="/" className="set-sidebar-head" style={{ textDecoration: "none" }}>
         <div
           className="workspace-logo"
           style={{ width: 26, height: 26, borderRadius: 7, fontSize: 12 }}
@@ -87,7 +87,7 @@ export function SettingsSidebar({ active, onChange }: Props) {
           <div>UserBase</div>
           <div className="set-sidebar-head-sub">Business plan</div>
         </div>
-      </div>
+      </Link>
 
       <Link href="/" className="set-nav-item" style={{ marginTop: 6 }}>
         <I.ArrowRight
