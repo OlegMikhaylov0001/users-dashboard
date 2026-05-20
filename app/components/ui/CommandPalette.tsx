@@ -4,6 +4,8 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import type { User } from "../../types";
 import { I } from "../icons";
 import { initials, paletteFor } from "../../lib/palette";
+import { cn } from "../../lib/utils";
+import { useClickOutside } from "../../hooks/useClickOutside";
 import Image from "next/image";
 
 interface CommandPaletteProps {
@@ -29,116 +31,70 @@ export function CommandPalette({ isOpen, onClose, users, onSelectUser, onExecute
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Reset query/index on open transition (render-time pattern — preferred over useEffect)
+  useClickOutside(containerRef, () => { if (isOpen) onClose(); });
+
   if (wasOpen !== isOpen) {
     setWasOpen(isOpen);
-    if (isOpen) {
-      setQuery("");
-      setSelectedIndex(0);
-    }
+    if (isOpen) { setQuery(""); setSelectedIndex(0); }
   }
 
-  // Focus input on open (DOM sync — effects are the right place for this)
   useEffect(() => {
     if (!isOpen) return;
     const t = setTimeout(() => inputRef.current?.focus(), 50);
     return () => clearTimeout(t);
   }, [isOpen]);
 
-  // Click outside listener
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    if (isOpen) {
-      document.addEventListener("mousedown", handleClickOutside);
-    }
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-    };
-  }, [isOpen, onClose]);
-
-  // Filter commands and users
   const filteredCommands = useMemo(() => {
     const q = query.toLowerCase().trim();
     if (!q) return COMMANDS;
-    // If query starts with '>', strip it
     const cleanQ = q.startsWith(">") ? q.slice(1).trim() : q;
     if (!cleanQ) return COMMANDS;
-    return COMMANDS.filter(
-      (c) => c.label.toLowerCase().includes(cleanQ) || c.description.toLowerCase().includes(cleanQ)
-    );
+    return COMMANDS.filter(c => c.label.toLowerCase().includes(cleanQ) || c.description.toLowerCase().includes(cleanQ));
   }, [query]);
 
   const filteredUsers = useMemo(() => {
     const q = query.toLowerCase().trim();
-    // If it starts with '>', only show commands!
     if (q.startsWith(">")) return [];
-    if (!q) return users.slice(0, 5); // default recent users
-    return users
-      .filter((u) => {
-        const fullName = `${u.firstName} ${u.lastName}`.toLowerCase();
-        return (
-          fullName.includes(q) ||
-          u.email.toLowerCase().includes(q) ||
-          u.username.toLowerCase().includes(q) ||
-          u.company.department.toLowerCase().includes(q) ||
-          u.address.city.toLowerCase().includes(q)
-        );
-      })
-      .slice(0, 8); // limit results
+    if (!q) return users.slice(0, 5);
+    return users.filter((u) => {
+      const fullName = `${u.firstName} ${u.lastName}`.toLowerCase();
+      return fullName.includes(q) || u.email.toLowerCase().includes(q) || u.username.toLowerCase().includes(q) || u.company.department.toLowerCase().includes(q) || u.address.city.toLowerCase().includes(q);
+    }).slice(0, 8);
   }, [query, users]);
 
   const mergedList = useMemo(() => {
-    const items: Array<
-      | { type: "command"; data: typeof COMMANDS[number] }
-      | { type: "user"; data: User }
-    > = [];
+    const items: Array<{ type: "command"; data: typeof COMMANDS[number] } | { type: "user"; data: User }> = [];
     filteredCommands.forEach((c) => items.push({ type: "command", data: c }));
     filteredUsers.forEach((u) => items.push({ type: "user", data: u }));
     return items;
   }, [filteredCommands, filteredUsers]);
 
-  // Reset selected index when search changes (render-time pattern)
   const [prevQuery, setPrevQuery] = useState(query);
   if (prevQuery !== query) {
     setPrevQuery(query);
     setSelectedIndex(0);
   }
 
-  // Keyboard navigation
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (!isOpen) return;
-
-      if (e.key === "Escape") {
-        e.preventDefault();
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      onClose();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSelectedIndex((prev) => (mergedList.length ? (prev + 1) % mergedList.length : 0));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSelectedIndex((prev) => (mergedList.length ? (prev - 1 + mergedList.length) % mergedList.length : 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (mergedList[selectedIndex]) {
+        const item = mergedList[selectedIndex];
+        if (item.type === "command") onExecuteCommand(item.data.id);
+        else onSelectUser(item.data);
         onClose();
-      } else if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setSelectedIndex((prev) => (mergedList.length ? (prev + 1) % mergedList.length : 0));
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setSelectedIndex((prev) => (mergedList.length ? (prev - 1 + mergedList.length) % mergedList.length : 0));
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        if (mergedList[selectedIndex]) {
-          const item = mergedList[selectedIndex];
-          if (item.type === "command") {
-            onExecuteCommand(item.data.id);
-          } else {
-            onSelectUser(item.data);
-          }
-          onClose();
-        }
       }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, mergedList, selectedIndex, onClose, onExecuteCommand, onSelectUser]);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -154,6 +110,7 @@ export function CommandPalette({ isOpen, onClose, users, onSelectUser, onExecute
             placeholder="Type a command (e.g. > filter) or search users..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={handleKeyDown}
           />
           <span className="cmd-esc-badge">ESC</span>
         </div>
@@ -173,7 +130,7 @@ export function CommandPalette({ isOpen, onClose, users, onSelectUser, onExecute
                     return (
                       <div
                         key={c.id}
-                        className={`cmd-item ${isSel ? "active" : ""}`}
+                        className={cn("cmd-item", isSel && "active")}
                         onMouseEnter={() => setSelectedIndex(globalIdx)}
                         onClick={() => {
                           onExecuteCommand(c.id);
@@ -206,7 +163,7 @@ export function CommandPalette({ isOpen, onClose, users, onSelectUser, onExecute
                     return (
                       <div
                         key={u.id}
-                        className={`cmd-item ${isSel ? "active" : ""}`}
+                        className={cn("cmd-item", isSel && "active")}
                         onMouseEnter={() => setSelectedIndex(globalIdx)}
                         onClick={() => {
                           onSelectUser(u);
@@ -250,15 +207,9 @@ export function CommandPalette({ isOpen, onClose, users, onSelectUser, onExecute
         </div>
 
         <div className="cmd-footer">
-          <span className="cmd-help-item">
-            <kbd>↑↓</kbd> Navigate
-          </span>
-          <span className="cmd-help-item">
-            <kbd>↵</kbd> Select
-          </span>
-          <span className="cmd-help-item">
-            <kbd>Esc</kbd> Close
-          </span>
+          <span className="cmd-help-item"><kbd>↑↓</kbd> Navigate</span>
+          <span className="cmd-help-item"><kbd>↵</kbd> Select</span>
+          <span className="cmd-help-item"><kbd>Esc</kbd> Close</span>
           <span className="cmd-help-item" style={{ marginLeft: "auto" }}>
             Type <kbd>&gt;</kbd> for commands only
           </span>

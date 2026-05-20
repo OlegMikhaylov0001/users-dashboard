@@ -5,6 +5,8 @@ import { useContext } from "react";
 import { DashboardCtx } from "./dashboard-ctx";
 import { I } from "./icons";
 
+import { cn } from "../lib/utils";
+
 interface SavedView {
   id: string;
   name: string;
@@ -59,7 +61,7 @@ export function Sidebar({
       <div className="nav-section">
         <button
           type="button"
-          className={"nav-item" + (active === "users" ? " active" : "")}
+          className={cn("nav-item", active === "users" && "active")}
           onClick={() => {
             onSelectActive("users");
             onClearFilters();
@@ -71,7 +73,7 @@ export function Sidebar({
         </button>
         <button
           type="button"
-          className={"nav-item" + (active === "charts" ? " active" : "")}
+          className={cn("nav-item", active === "charts" && "active")}
           onClick={() => onSelectActive("charts")}
         >
           <I.Chart size={14} className="nav-item-icon" />
@@ -79,7 +81,7 @@ export function Sidebar({
         </button>
         <button
           type="button"
-          className={"nav-item" + (active === "admins" ? " active" : "")}
+          className={cn("nav-item", active === "admins" && "active")}
           onClick={() => {
             onSelectActive("admins");
             ctx.clear();
@@ -117,7 +119,7 @@ export function Sidebar({
           >
             <button
               type="button"
-              className={"nav-item" + (activeSavedId === v.id ? " active" : "")}
+              className={cn("nav-item", activeSavedId === v.id && "active")}
               onClick={() => onApplySaved(v.id)}
               style={{ flex: 1, paddingRight: v.isCustom ? "32px" : "8px" }}
             >
