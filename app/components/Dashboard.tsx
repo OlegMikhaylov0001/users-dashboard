@@ -1,14 +1,16 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { User } from "../types";
 import { DashboardCtx } from "./dashboard-ctx";
-import { useDashboard, type SortKey } from "../hooks/useDashboard";
+import { useDashboard, type SortKey, type Filters, applyFilters } from "../hooks/useDashboard";
 import { Sidebar } from "./Sidebar";
 import { FilterChip } from "./ui/FilterChip";
 import { UserTable, type TableSortKey } from "./users/UserTable";
 import { SidePanel } from "./users/SidePanel";
 import { ChatWidget } from "./ChatWidget";
+import { CommandPalette } from "./ui/CommandPalette";
+import { AnalyticsView } from "./users/AnalyticsView";
 import { I } from "./icons";
 
 interface DashboardProps {
@@ -36,6 +38,13 @@ function toInternalSort(k: TableSortKey): SortKey {
   return "firstName"; // role/title/city — fall back to firstName for now
 }
 
+interface CustomPreset {
+  id: string;
+  name: string;
+  filters: Filters;
+  ageFilter: [number, number] | null;
+}
+
 export default function Dashboard({ users, departments, titles, countries, states }: DashboardProps) {
   const db = useDashboard(users);
   const [tab, setTab] = useState<Tab>("all");
@@ -48,26 +57,125 @@ export default function Dashboard({ users, departments, titles, countries, state
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [cursorId, setCursorId] = useState<number | null>(null);
 
+  const [customViews, setCustomViews] = useState<CustomPreset[]>(() => {
+    if (typeof window === "undefined") return [];
+    const saved = localStorage.getItem("userbase_custom_views");
+    if (!saved) return [];
+    try {
+      return JSON.parse(saved) as CustomPreset[];
+    } catch {
+      return [];
+    }
+  });
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [newViewName, setNewViewName] = useState("");
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+
+  // Global key listener for ⌘K / Ctrl+K
+  useEffect(() => {
+    const handleGlobalK = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setIsSearchOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleGlobalK);
+    return () => window.removeEventListener("keydown", handleGlobalK);
+  }, []);
+
+  const handleSelectUser = (u: User) => {
+    db.setSelected(u);
+    setCursorId(u.id);
+  };
+
+  const handleExecuteCommand = (cmdId: string) => {
+    if (cmdId === "filter_admin") {
+      db.clear();
+      db.setFilter("role", "admin");
+    } else if (cmdId === "clear_filters") {
+      db.clear();
+      setActiveSavedId(null);
+    } else if (cmdId === "toggle_theme") {
+      const html = document.documentElement;
+      const next = html.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      html.setAttribute("data-theme", next);
+    } else if (cmdId === "export_csv") {
+      handleExportCSV();
+    } else if (cmdId === "open_assistant") {
+      // Find the chat trigger button and click it to open
+      const btn = document.querySelector(".chat-trigger") as HTMLButtonElement;
+      if (btn) btn.click();
+    }
+  };
+
   const adminsCount = useMemo(() => users.filter((u) => u.role === "admin").length, [users]);
 
-  const savedViews = useMemo(
-    () =>
-      SAVED_PRESETS.map((p) => {
-        const count = users.filter((u) =>
-          p.department ? u.company.department === p.department : u.role === p.role,
-        ).length;
-        return { id: p.id, name: p.name, count, department: p.department, role: p.role };
-      }),
-    [users],
-  );
+  const savedViews = useMemo(() => {
+    const defaults = SAVED_PRESETS.map((p) => ({
+      id: p.id,
+      name: p.name,
+      count: users.filter((u) =>
+        p.department ? u.company.department === p.department : u.role === p.role,
+      ).length,
+      department: p.department,
+      role: p.role,
+      isCustom: false as const,
+    }));
+
+    const customs = customViews.map((cv) => ({
+      id: cv.id,
+      name: cv.name,
+      count: applyFilters(users, cv.filters, cv.ageFilter).length,
+      filters: cv.filters,
+      ageFilter: cv.ageFilter,
+      isCustom: true as const,
+    }));
+
+    return [...defaults, ...customs];
+  }, [users, customViews]);
 
   const applySaved = (id: string) => {
     const v = savedViews.find((x) => x.id === id);
     if (!v) return;
     db.clear();
-    if (v.department) db.applyPreset(v.department);
-    else if (v.role) db.setFilter("role", v.role);
+    if (v.isCustom) {
+      Object.entries(v.filters).forEach(([key, val]) => {
+        db.setFilter(key as keyof Filters, val as string);
+      });
+      if (v.ageFilter) {
+        db.onAgeChange(v.ageFilter);
+      }
+    } else {
+      if (v.department) db.applyPreset(v.department);
+      else if (v.role) db.setFilter("role", v.role);
+    }
     setActiveSavedId(id);
+  };
+
+  const handleSaveView = () => {
+    if (!newViewName.trim() || !db.hasFilters) return;
+    const newPreset: CustomPreset = {
+      id: "custom_" + Date.now(),
+      name: newViewName.trim(),
+      filters: { ...db.filters },
+      ageFilter: db.ageFilter,
+    };
+    const updated = [...customViews, newPreset];
+    setCustomViews(updated);
+    localStorage.setItem("userbase_custom_views", JSON.stringify(updated));
+    setShowSaveModal(false);
+    setNewViewName("");
+    setActiveSavedId(newPreset.id);
+  };
+
+  const handleDeleteCustomView = (id: string) => {
+    const updated = customViews.filter((cv) => cv.id !== id);
+    setCustomViews(updated);
+    localStorage.setItem("userbase_custom_views", JSON.stringify(updated));
+    if (activeSavedId === id) {
+      setActiveSavedId(null);
+      db.clear();
+    }
   };
 
   // Apply tab on top of regular filters
@@ -148,6 +256,51 @@ export default function Dashboard({ users, departments, titles, countries, state
   });
   const maxB = Math.max(...buckets, 1);
 
+  const handleExportCSV = () => {
+    if (tabFiltered.length === 0) return;
+    const headers = [
+      "ID",
+      "First Name",
+      "Last Name",
+      "Email",
+      "Username",
+      "Phone",
+      "Age",
+      "Gender",
+      "Role",
+      "Department",
+      "Title",
+      "City",
+      "Country",
+    ];
+    const rows = tabFiltered.map((u) => [
+      u.id,
+      u.firstName,
+      u.lastName,
+      u.email,
+      u.username,
+      u.phone,
+      u.age,
+      u.gender,
+      u.role,
+      u.company.department,
+      u.company.title,
+      u.address.city,
+      u.address.country,
+    ]);
+    const csvString = [headers.join(","), ...rows.map((e) => e.map(val => `"${String(val ?? "").replace(/"/g, '""')}"`).join(","))].join("\r\n");
+    const blob = new Blob([csvString], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    const dateStr = new Date().toISOString().split("T")[0];
+    link.setAttribute("download", `users_export_${dateStr}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <DashboardCtx.Provider
       value={{
@@ -176,6 +329,8 @@ export default function Dashboard({ users, departments, titles, countries, state
           }}
           active={active}
           onSelectActive={setActive}
+          onDeleteCustomView={handleDeleteCustomView}
+          onOpenSearch={() => setIsSearchOpen(true)}
         />
 
         <div className="main">
@@ -208,7 +363,12 @@ export default function Dashboard({ users, departments, titles, countries, state
                 )}
                 {!db.filters.q && <span className="ds-kbd">/</span>}
               </div>
-              <button type="button" className="ds-btn-ghost" title="Export CSV (coming soon)">
+              <button
+                type="button"
+                className="ds-btn-ghost"
+                title="Export active filter list to CSV"
+                onClick={handleExportCSV}
+              >
                 <I.Download size={12} />
                 Export
               </button>
@@ -321,10 +481,48 @@ export default function Dashboard({ users, departments, titles, countries, state
               </button>
             )}
             <div className="filter-spacer" />
-            <button type="button" className="ds-btn-outline" style={{ whiteSpace: "nowrap" }}>
-              <I.Star size={11} />
-              Save view
-            </button>
+            <div style={{ position: "relative" }}>
+              <button
+                type="button"
+                className="ds-btn-outline"
+                style={{ whiteSpace: "nowrap" }}
+                onClick={() => {
+                  if (!db.hasFilters) {
+                    alert("Please apply at least one filter before saving a view!");
+                    return;
+                  }
+                  setNewViewName("");
+                  setShowSaveModal(!showSaveModal);
+                }}
+              >
+                <I.Star size={11} style={{ color: db.hasFilters ? "var(--accent)" : "inherit", fill: db.hasFilters ? "var(--accent)" : "none" }} />
+                Save view
+              </button>
+              {showSaveModal && (
+                <div className="save-view-popover">
+                  <div className="save-view-popover-title">Save Custom View</div>
+                  <input
+                    type="text"
+                    placeholder="Enter view name..."
+                    value={newViewName}
+                    onChange={(e) => setNewViewName(e.target.value)}
+                    autoFocus
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleSaveView();
+                      if (e.key === "Escape") setShowSaveModal(false);
+                    }}
+                  />
+                  <div className="save-view-popover-actions">
+                    <button type="button" className="ds-btn-ghost" onClick={() => setShowSaveModal(false)}>
+                      Cancel
+                    </button>
+                    <button type="button" className="ds-btn-primary" onClick={handleSaveView} disabled={!newViewName.trim()}>
+                      Save
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Charts strip */}
@@ -381,7 +579,9 @@ export default function Dashboard({ users, departments, titles, countries, state
           {/* Table + side panel */}
           <div className="table-wrap">
             <div className="table-scroll">
-              {tabFiltered.length === 0 ? (
+              {active === "charts" ? (
+                <AnalyticsView users={tabFiltered} />
+              ) : tabFiltered.length === 0 ? (
                 <div style={{ padding: "60px 24px", textAlign: "center", color: "var(--fg-tertiary)" }}>
                   <div style={{ fontSize: 14, fontWeight: 500, color: "var(--fg-secondary)" }}>
                     No users match these filters
@@ -459,6 +659,14 @@ export default function Dashboard({ users, departments, titles, countries, state
 
       {/* Chat assistant — kept as-is on the light app theme */}
       <ChatWidget />
+
+      <CommandPalette
+        isOpen={isSearchOpen}
+        onClose={() => setIsSearchOpen(false)}
+        users={users}
+        onSelectUser={handleSelectUser}
+        onExecuteCommand={handleExecuteCommand}
+      />
     </DashboardCtx.Provider>
   );
 }

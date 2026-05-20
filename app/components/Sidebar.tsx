@@ -10,6 +10,7 @@ interface SavedView {
   count: number;
   department?: string;
   role?: string;
+  isCustom?: boolean;
 }
 
 interface SidebarProps {
@@ -21,6 +22,8 @@ interface SidebarProps {
   onClearFilters: () => void;
   active: "users" | "charts" | "admins";
   onSelectActive: (id: "users" | "charts" | "admins") => void;
+  onDeleteCustomView?: (id: string) => void;
+  onOpenSearch?: () => void;
 }
 
 export function Sidebar({
@@ -32,6 +35,8 @@ export function Sidebar({
   onClearFilters,
   active,
   onSelectActive,
+  onDeleteCustomView,
+  onOpenSearch,
 }: SidebarProps) {
   const ctx = useContext(DashboardCtx);
   if (!ctx) return null;
@@ -44,7 +49,7 @@ export function Sidebar({
         <I.ChevDown size={13} className="workspace-chev" />
       </button>
 
-      <button className="sidebar-search" type="button" title="Search (⌘K — coming soon)">
+      <button className="sidebar-search" type="button" title="Search (⌘K)" onClick={onOpenSearch}>
         <I.Search size={13} />
         <span className="sidebar-search-text">Search</span>
         <span className="ds-kbd">⌘K</span>
@@ -99,16 +104,50 @@ export function Sidebar({
           </button>
         </div>
         {savedViews.map((v) => (
-          <button
+          <div
             key={v.id}
-            type="button"
-            className={"nav-item" + (activeSavedId === v.id ? " active" : "")}
-            onClick={() => onApplySaved(v.id)}
+            className="nav-item-preset-wrapper"
+            style={{
+              position: "relative",
+              display: "flex",
+              alignItems: "center",
+              width: "100%",
+            }}
           >
-            <I.Bookmark size={13} className="nav-item-icon" />
-            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.name}</span>
-            <span className="nav-item-count">{v.count}</span>
-          </button>
+            <button
+              type="button"
+              className={"nav-item" + (activeSavedId === v.id ? " active" : "")}
+              onClick={() => onApplySaved(v.id)}
+              style={{ flex: 1, paddingRight: v.isCustom ? "32px" : "8px" }}
+            >
+              <I.Bookmark size={13} className="nav-item-icon" />
+              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.name}</span>
+              <span className="nav-item-count">{v.count}</span>
+            </button>
+            {v.isCustom && onDeleteCustomView && (
+              <button
+                type="button"
+                className="ds-icon-btn preset-delete-btn"
+                title="Delete saved view"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDeleteCustomView(v.id);
+                }}
+                style={{
+                  position: "absolute",
+                  right: "6px",
+                  padding: "4px",
+                  zIndex: 5,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  opacity: 0.5,
+                }}
+              >
+                <I.X size={10} />
+              </button>
+            )}
+          </div>
         ))}
       </div>
 
