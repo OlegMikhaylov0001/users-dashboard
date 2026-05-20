@@ -19,11 +19,11 @@ export function InvitationsApp() {
   return (
     <div className="inv-layout">
       <aside className="sidebar">
-        <button className="workspace" type="button">
+        <Link href="/" className="workspace" style={{ textDecoration: "none" }}>
           <div className="workspace-logo">U</div>
           <div className="workspace-name">UserBase</div>
           <I.ChevDown size={13} className="workspace-chev" />
-        </button>
+        </Link>
 
         <button className="sidebar-search" type="button" title="Search (⌘K)">
           <I.Search size={13} />
