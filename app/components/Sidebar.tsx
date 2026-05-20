@@ -92,11 +92,11 @@ export function Sidebar({
           <span>Admins</span>
           <span className="nav-item-count">{adminsCount}</span>
         </button>
-        <button type="button" className="nav-item">
+        <Link href="/invitations" className="nav-item">
           <I.Inbox size={14} className="nav-item-icon" />
           <span>Invitations</span>
           <span className="nav-item-dot" />
-        </button>
+        </Link>
       </div>
 
       <div className="nav-section">
