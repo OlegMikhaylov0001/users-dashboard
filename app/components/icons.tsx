@@ -119,6 +119,20 @@ export const I = {
     </>,
   ),
   Refresh: makeIcon(<path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5" />),
+
+  /* Invitations page icons */
+  Clock: makeIcon(
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </>,
+  ),
+  Globe: makeIcon(
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+    </>,
+  ),
 };
 
 export type IconName = keyof typeof I;
