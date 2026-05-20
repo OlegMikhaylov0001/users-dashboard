@@ -1,17 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type { User } from "../types";
 import { DashboardCtx } from "./dashboard-ctx";
-import { useDashboard, type SortKey, type Filters, applyFilters } from "../hooks/useDashboard";
+import { useDashboard, type SortKey, type Filters } from "../hooks/useDashboard";
+import { useCustomViews } from "../hooks/useCustomViews";
+import { useKeyboardShortcut } from "../hooks/useKeyboardShortcut";
 import { Sidebar } from "./Sidebar";
-import { FilterChip } from "./ui/FilterChip";
 import { UserTable, type TableSortKey } from "./users/UserTable";
 import { SidePanel } from "./users/SidePanel";
 import { ChatWidget } from "./ChatWidget";
 import { CommandPalette } from "./ui/CommandPalette";
 import { AnalyticsView } from "./users/AnalyticsView";
-import { I } from "./icons";
+import { Topbar } from "./dashboard/Topbar";
+import { Filterbar, type Tab } from "./dashboard/Filterbar";
+import { ChartsStrip } from "./dashboard/ChartsStrip";
+import { Statusbar } from "./dashboard/Statusbar";
 
 interface DashboardProps {
   users: User[];
@@ -21,67 +25,25 @@ interface DashboardProps {
   states: string[];
 }
 
-const SAVED_PRESETS = [
-  { id: "eng", name: "Engineering", department: "Engineering" },
-  { id: "hr", name: "HR team", department: "Human Resources" },
-  { id: "marketing", name: "Marketing", department: "Marketing" },
-  { id: "leaders", name: "Leadership", role: "admin" as const },
-];
-
-type Tab = "all" | "admin" | "moderator" | "female" | "male";
-
-// Map table sort keys to internal useDashboard SortKey
 function toInternalSort(k: TableSortKey): SortKey {
   if (k === "name") return "firstName";
   if (k === "department") return "dept";
   if (k === "age") return "age";
-  return "firstName"; // role/title/city — fall back to firstName for now
-}
-
-interface CustomPreset {
-  id: string;
-  name: string;
-  filters: Filters;
-  ageFilter: [number, number] | null;
+  return "firstName";
 }
 
 export default function Dashboard({ users, departments, titles, countries, states }: DashboardProps) {
   const db = useDashboard(users);
+  const cv = useCustomViews(users, db);
   const [tab, setTab] = useState<Tab>("all");
   const [active, setActive] = useState<"users" | "charts" | "admins">("users");
-  const [activeSavedId, setActiveSavedId] = useState<string | null>(null);
-  const [tableSort, setTableSort] = useState<{ key: TableSortKey; dir: "asc" | "desc" }>({
-    key: "name",
-    dir: "asc",
-  });
+  const [tableSort, setTableSort] = useState<{ key: TableSortKey; dir: "asc" | "desc" }>({ key: "name", dir: "asc" });
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [cursorId, setCursorId] = useState<number | null>(null);
-
-  const [customViews, setCustomViews] = useState<CustomPreset[]>(() => {
-    if (typeof window === "undefined") return [];
-    const saved = localStorage.getItem("userbase_custom_views");
-    if (!saved) return [];
-    try {
-      return JSON.parse(saved) as CustomPreset[];
-    } catch {
-      return [];
-    }
-  });
-  const [showSaveModal, setShowSaveModal] = useState(false);
-  const [newViewName, setNewViewName] = useState("");
   const [isSearchOpen, setIsSearchOpen] = useState(false);
 
-  // Global key listener for ⌘K / Ctrl+K
-  useEffect(() => {
-    const handleGlobalK = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
-        e.preventDefault();
-        setIsSearchOpen((prev) => !prev);
-      }
-    };
-    window.addEventListener("keydown", handleGlobalK);
-    return () => window.removeEventListener("keydown", handleGlobalK);
-  }, []);
+  // Global key listener for ⌘K / Ctrl+K encapsulated via custom hook
+  useKeyboardShortcut("k", () => setIsSearchOpen((prev) => !prev), { metaOrCtrl: true });
 
   const handleSelectUser = (u: User) => {
     db.setSelected(u);
@@ -94,15 +56,14 @@ export default function Dashboard({ users, departments, titles, countries, state
       db.setFilter("role", "admin");
     } else if (cmdId === "clear_filters") {
       db.clear();
-      setActiveSavedId(null);
+      cv.resetActivePreset();
     } else if (cmdId === "toggle_theme") {
       const html = document.documentElement;
-      const next = html.getAttribute("data-theme") === "dark" ? "light" : "dark";
-      html.setAttribute("data-theme", next);
+      const next = html.dataset.theme === "dark" ? "light" : "dark";
+      html.dataset.theme = next;
     } else if (cmdId === "export_csv") {
       handleExportCSV();
     } else if (cmdId === "open_assistant") {
-      // Find the chat trigger button and click it to open
       const btn = document.querySelector(".chat-trigger") as HTMLButtonElement;
       if (btn) btn.click();
     }
@@ -110,82 +71,14 @@ export default function Dashboard({ users, departments, titles, countries, state
 
   const adminsCount = useMemo(() => users.filter((u) => u.role === "admin").length, [users]);
 
-  const savedViews = useMemo(() => {
-    const defaults = SAVED_PRESETS.map((p) => ({
-      id: p.id,
-      name: p.name,
-      count: users.filter((u) =>
-        p.department ? u.company.department === p.department : u.role === p.role,
-      ).length,
-      department: p.department,
-      role: p.role,
-      isCustom: false as const,
-    }));
-
-    const customs = customViews.map((cv) => ({
-      id: cv.id,
-      name: cv.name,
-      count: applyFilters(users, cv.filters, cv.ageFilter).length,
-      filters: cv.filters,
-      ageFilter: cv.ageFilter,
-      isCustom: true as const,
-    }));
-
-    return [...defaults, ...customs];
-  }, [users, customViews]);
-
-  const applySaved = (id: string) => {
-    const v = savedViews.find((x) => x.id === id);
-    if (!v) return;
-    db.clear();
-    if (v.isCustom) {
-      Object.entries(v.filters).forEach(([key, val]) => {
-        db.setFilter(key as keyof Filters, val as string);
-      });
-      if (v.ageFilter) {
-        db.onAgeChange(v.ageFilter);
-      }
-    } else {
-      if (v.department) db.applyPreset(v.department);
-      else if (v.role) db.setFilter("role", v.role);
-    }
-    setActiveSavedId(id);
-  };
-
-  const handleSaveView = () => {
-    if (!newViewName.trim() || !db.hasFilters) return;
-    const newPreset: CustomPreset = {
-      id: "custom_" + Date.now(),
-      name: newViewName.trim(),
-      filters: { ...db.filters },
-      ageFilter: db.ageFilter,
-    };
-    const updated = [...customViews, newPreset];
-    setCustomViews(updated);
-    localStorage.setItem("userbase_custom_views", JSON.stringify(updated));
-    setShowSaveModal(false);
-    setNewViewName("");
-    setActiveSavedId(newPreset.id);
-  };
-
-  const handleDeleteCustomView = (id: string) => {
-    const updated = customViews.filter((cv) => cv.id !== id);
-    setCustomViews(updated);
-    localStorage.setItem("userbase_custom_views", JSON.stringify(updated));
-    if (activeSavedId === id) {
-      setActiveSavedId(null);
-      db.clear();
-    }
-  };
-
-  // Apply tab on top of regular filters
+  // Apply tab filters on top of regular filter sets
   const tabFiltered = useMemo(() => {
     let list = db.filtered;
     if (tab === "admin") list = list.filter((u) => u.role === "admin");
     else if (tab === "moderator") list = list.filter((u) => u.role === "moderator");
     else if (tab === "female") list = list.filter((u) => u.gender === "female");
     else if (tab === "male") list = list.filter((u) => u.gender === "male");
-    // Custom sort by city — fall through to default useDashboard sort otherwise
+    
     if (tableSort.key === "city") {
       list = [...list].sort((a, b) => a.address.city.localeCompare(b.address.city));
     } else if (tableSort.key === "role") {
@@ -197,23 +90,17 @@ export default function Dashboard({ users, departments, titles, countries, state
     return list;
   }, [db.filtered, tab, tableSort]);
 
-  const counts = useMemo(
-    () => ({
-      all: db.filtered.length,
-      admin: db.filtered.filter((u) => u.role === "admin").length,
-      moderator: db.filtered.filter((u) => u.role === "moderator").length,
-      female: db.filtered.filter((u) => u.gender === "female").length,
-      male: db.filtered.filter((u) => u.gender === "male").length,
-    }),
-    [db.filtered],
-  );
+  const counts = useMemo(() => ({
+    all: db.filtered.length,
+    admin: db.filtered.filter((u) => u.role === "admin").length,
+    moderator: db.filtered.filter((u) => u.role === "moderator").length,
+    female: db.filtered.filter((u) => u.gender === "female").length,
+    male: db.filtered.filter((u) => u.gender === "male").length,
+  }), [db.filtered]);
 
   const onTableSort = (key: TableSortKey) => {
-    if (key === tableSort.key) {
-      setTableSort({ key, dir: tableSort.dir === "asc" ? "desc" : "asc" });
-    } else {
-      setTableSort({ key, dir: "asc" });
-    }
+    const nextDir = key === tableSort.key && tableSort.dir === "asc" ? "desc" : "asc";
+    setTableSort({ key, dir: nextDir });
     db.setSort(toInternalSort(key));
   };
 
@@ -225,76 +112,28 @@ export default function Dashboard({ users, departments, titles, countries, state
       return next;
     });
   };
+
   const toggleAll = () => {
     if (tabFiltered.every((u) => selectedIds.has(u.id))) setSelectedIds(new Set());
     else setSelectedIds(new Set(tabFiltered.map((u) => u.id)));
   };
 
-  // Side panel nav helpers
   const openIdx = db.selected ? tabFiltered.findIndex((u) => u.id === db.selected!.id) : -1;
-  const onNext = openIdx >= 0 && openIdx < tabFiltered.length - 1
-    ? () => db.setSelected(tabFiltered[openIdx + 1])
-    : undefined;
-  const onPrev = openIdx > 0
-    ? () => db.setSelected(tabFiltered[openIdx - 1])
-    : undefined;
-
-  // KPIs for charts strip
-  const total = tabFiltered.length;
-  const avgAge = total ? Math.round(tabFiltered.reduce((s, u) => s + u.age, 0) / total) : 0;
-  const deptCounts: Record<string, number> = {};
-  tabFiltered.forEach((u) => {
-    deptCounts[u.company.department] = (deptCounts[u.company.department] ?? 0) + 1;
-  });
-  const topDept = Object.entries(deptCounts).sort((a, b) => b[1] - a[1])[0] ?? ["—", 0];
-  const femaleCount = tabFiltered.filter((u) => u.gender === "female").length;
-  const fPct = total ? Math.round((femaleCount / total) * 100) : 0;
-  const buckets = [0, 0, 0, 0, 0];
-  tabFiltered.forEach((u) => {
-    const b = u.age < 26 ? 0 : u.age < 36 ? 1 : u.age < 46 ? 2 : u.age < 56 ? 3 : 4;
-    buckets[b]++;
-  });
-  const maxB = Math.max(...buckets, 1);
+  const onNext = openIdx >= 0 && openIdx < tabFiltered.length - 1 ? () => db.setSelected(tabFiltered[openIdx + 1]) : undefined;
+  const onPrev = openIdx > 0 ? () => db.setSelected(tabFiltered[openIdx - 1]) : undefined;
 
   const handleExportCSV = () => {
     if (tabFiltered.length === 0) return;
-    const headers = [
-      "ID",
-      "First Name",
-      "Last Name",
-      "Email",
-      "Username",
-      "Phone",
-      "Age",
-      "Gender",
-      "Role",
-      "Department",
-      "Title",
-      "City",
-      "Country",
-    ];
+    const headers = ["ID", "First Name", "Last Name", "Email", "Username", "Phone", "Age", "Gender", "Role", "Department", "Title", "City", "Country"];
     const rows = tabFiltered.map((u) => [
-      u.id,
-      u.firstName,
-      u.lastName,
-      u.email,
-      u.username,
-      u.phone,
-      u.age,
-      u.gender,
-      u.role,
-      u.company.department,
-      u.company.title,
-      u.address.city,
-      u.address.country,
+      u.id, u.firstName, u.lastName, u.email, u.username, u.phone, u.age, u.gender, u.role, u.company.department, u.company.title, u.address.city, u.address.country
     ]);
     const csvString = [headers.join(","), ...rows.map((e) => e.map(val => `"${String(val ?? "").replace(/"/g, '""')}"`).join(","))].join("\r\n");
     const blob = new Blob([csvString], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    const dateStr = new Date().toISOString().split("T")[0];
-    link.setAttribute("download", `users_export_${dateStr}.csv`);
+    link.setAttribute("download", `users_export_${new Date().toISOString().split("T")[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -302,303 +141,68 @@ export default function Dashboard({ users, departments, titles, countries, state
   };
 
   return (
-    <DashboardCtx.Provider
-      value={{
-        users,
-        setFilter: db.setFilter,
-        applyPreset: db.applyPreset,
-        clear: () => {
-          db.clear();
-          setActiveSavedId(null);
-        },
-        onAgeChange: db.onAgeChange,
-        setSelected: db.setSelected,
-        getCurrentFilters: () => ({ ...db.filters, ageFilter: db.ageFilter }),
-      }}
-    >
+    <DashboardCtx.Provider value={{
+      users,
+      setFilter: db.setFilter,
+      applyPreset: db.applyPreset,
+      clear: () => { db.clear(); cv.resetActivePreset(); },
+      onAgeChange: db.onAgeChange,
+      setSelected: db.setSelected,
+      getCurrentFilters: () => ({ ...db.filters, ageFilter: db.ageFilter }),
+    }}>
       <div className="app">
         <Sidebar
           totalUsers={users.length}
           adminsCount={adminsCount}
-          savedViews={savedViews}
-          activeSavedId={activeSavedId}
-          onApplySaved={applySaved}
-          onClearFilters={() => {
-            db.clear();
-            setActiveSavedId(null);
-          }}
+          savedViews={cv.savedViews}
+          activeSavedId={cv.activeSavedId}
+          onApplySaved={cv.applySaved}
+          onClearFilters={() => { db.clear(); cv.resetActivePreset(); }}
           active={active}
           onSelectActive={setActive}
-          onDeleteCustomView={handleDeleteCustomView}
+          onDeleteCustomView={cv.handleDeleteCustomView}
           onOpenSearch={() => setIsSearchOpen(true)}
         />
 
         <div className="main">
-          {/* Topbar */}
-          <div className="topbar">
-            <div className="topbar-title">
-              <span style={{ color: "var(--fg-tertiary)", fontWeight: 500 }}>Workspace</span>
-              <span className="topbar-crumb-sep">/</span>
-              <span>Users</span>
-              <span className="topbar-count tabular">{tabFiltered.length}</span>
-            </div>
-            <div className="topbar-right">
-              <div className="topbar-search">
-                <I.Search size={13} />
-                <input
-                  type="text"
-                  placeholder="Search name, email, username…"
-                  value={db.filters.q}
-                  onChange={(e) => db.setFilter("q", e.target.value)}
-                />
-                {db.filters.q && (
-                  <button
-                    type="button"
-                    className="ds-icon-btn"
-                    onClick={() => db.setFilter("q", "")}
-                    title="Clear"
-                  >
-                    <I.X size={11} />
-                  </button>
-                )}
-                {!db.filters.q && <span className="ds-kbd">/</span>}
-              </div>
-              <button
-                type="button"
-                className="ds-btn-ghost"
-                title="Export active filter list to CSV"
-                onClick={handleExportCSV}
-              >
-                <I.Download size={12} />
-                Export
-              </button>
-              <button
-                type="button"
-                className="ds-icon-btn"
-                title="Toggle theme"
-                onClick={() => {
-                  const html = document.documentElement;
-                  const next = html.dataset.theme === "dark" ? "light" : "dark";
-                  html.dataset.theme = next;
-                }}
-              >
-                <I.Moon size={13} />
-              </button>
-              <button type="button" className="ds-btn-primary">
-                <I.Plus size={12} />
-                Invite
-              </button>
-            </div>
-          </div>
+          <Topbar
+            totalCount={tabFiltered.length}
+            searchQuery={db.filters.q}
+            onSearchChange={(q) => db.setFilter("q", q)}
+            onExportCSV={handleExportCSV}
+            onOpenSearch={() => setIsSearchOpen(true)}
+          />
 
-          {/* Filter bar */}
-          <div className="filterbar">
-            <div className="view-tabs">
-              {(
-                [
-                  { id: "all", label: "All", count: counts.all },
-                  { id: "admin", label: "Admins", count: counts.admin },
-                  { id: "moderator", label: "Mods", count: counts.moderator },
-                  { id: "female", label: "Female", count: counts.female },
-                  { id: "male", label: "Male", count: counts.male },
-                ] as Array<{ id: Tab; label: string; count: number }>
-              ).map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  className={"view-tab" + (tab === t.id ? " active" : "")}
-                  onClick={() => setTab(t.id)}
-                >
-                  {t.label}
-                  <span className="view-tab-dot">{t.count}</span>
-                </button>
-              ))}
-            </div>
-            <div className="filter-divider" />
-            <FilterChip
-              label="Role"
-              value={db.filters.role}
-              options={[
-                { value: "admin", label: "Admin" },
-                { value: "moderator", label: "Moderator" },
-                { value: "user", label: "User" },
-              ]}
-              onSelect={(v) => db.setFilter("role", v)}
-              onClear={() => db.setFilter("role", "")}
-            />
-            <FilterChip
-              label="Department"
-              value={db.filters.department}
-              options={departments.map((d) => ({ value: d, label: d }))}
-              onSelect={(v) => db.setFilter("department", v)}
-              onClear={() => db.setFilter("department", "")}
-              searchable
-            />
-            <FilterChip
-              label="Gender"
-              value={db.filters.gender}
-              options={[
-                { value: "female", label: "Female" },
-                { value: "male", label: "Male" },
-              ]}
-              onSelect={(v) => db.setFilter("gender", v)}
-              onClear={() => db.setFilter("gender", "")}
-            />
-            <FilterChip
-              label="Title"
-              value={db.filters.title}
-              options={titles.map((t) => ({ value: t, label: t }))}
-              onSelect={(v) => db.setFilter("title", v)}
-              onClear={() => db.setFilter("title", "")}
-              searchable
-            />
-            <FilterChip
-              label="Country"
-              value={db.filters.country}
-              options={countries.map((c) => ({ value: c, label: c }))}
-              onSelect={(v) => db.setFilter("country", v)}
-              onClear={() => db.setFilter("country", "")}
-              searchable
-            />
-            <FilterChip
-              label="State"
-              value={db.filters.state}
-              options={states.map((s) => ({ value: s, label: s }))}
-              onSelect={(v) => db.setFilter("state", v)}
-              onClear={() => db.setFilter("state", "")}
-              searchable
-            />
-            {db.hasFilters && (
-              <button
-                type="button"
-                className="ds-btn-ghost"
-                onClick={() => {
-                  db.clear();
-                  setActiveSavedId(null);
-                }}
-              >
-                Reset
-              </button>
-            )}
-            <div className="filter-spacer" />
-            <div style={{ position: "relative" }}>
-              <button
-                type="button"
-                className="ds-btn-outline"
-                style={{ whiteSpace: "nowrap" }}
-                onClick={() => {
-                  if (!db.hasFilters) {
-                    alert("Please apply at least one filter before saving a view!");
-                    return;
-                  }
-                  setNewViewName("");
-                  setShowSaveModal(!showSaveModal);
-                }}
-              >
-                <I.Star size={11} style={{ color: db.hasFilters ? "var(--accent)" : "inherit", fill: db.hasFilters ? "var(--accent)" : "none" }} />
-                Save view
-              </button>
-              {showSaveModal && (
-                <div className="save-view-popover">
-                  <div className="save-view-popover-title">Save Custom View</div>
-                  <input
-                    type="text"
-                    placeholder="Enter view name..."
-                    value={newViewName}
-                    onChange={(e) => setNewViewName(e.target.value)}
-                    autoFocus
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") handleSaveView();
-                      if (e.key === "Escape") setShowSaveModal(false);
-                    }}
-                  />
-                  <div className="save-view-popover-actions">
-                    <button type="button" className="ds-btn-ghost" onClick={() => setShowSaveModal(false)}>
-                      Cancel
-                    </button>
-                    <button type="button" className="ds-btn-primary" onClick={handleSaveView} disabled={!newViewName.trim()}>
-                      Save
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
+          <Filterbar
+            tab={tab}
+            setTab={setTab}
+            counts={counts}
+            filters={db.filters}
+            setFilter={db.setFilter}
+            clearFilters={() => { db.clear(); cv.resetActivePreset(); }}
+            hasFilters={db.hasFilters}
+            departments={departments}
+            titles={titles}
+            countries={countries}
+            states={states}
+            showSaveModal={cv.showSaveModal}
+            setShowSaveModal={cv.setShowSaveModal}
+            newViewName={cv.newViewName}
+            setNewViewName={cv.setNewViewName}
+            handleSaveView={cv.handleSaveView}
+          />
 
-          {/* Charts strip */}
-          <div className="charts-strip">
-            <div className="chart-card">
-              <div className="chart-label">Total · filtered</div>
-              <div className="chart-value">
-                {tabFiltered.length}
-                <span className="chart-value-sub">/ {users.length}</span>
-              </div>
-            </div>
-            <div className="chart-card">
-              <div className="chart-label">Admins</div>
-              <div className="chart-value">
-                {tabFiltered.filter((u) => u.role === "admin").length}
-                <span className="chart-value-sub">{total ? Math.round((tabFiltered.filter((u) => u.role === "admin").length / total) * 100) : 0}%</span>
-              </div>
-            </div>
-            <div className="chart-card">
-              <div className="chart-label">Avg age · top dept</div>
-              <div className="chart-value" style={{ fontSize: 14 }}>
-                {avgAge} y
-                <span className="chart-value-sub" style={{ marginLeft: 8 }}>·</span>
-                <span className="chart-value-sub" style={{ marginLeft: 4, color: "var(--fg-secondary)" }}>
-                  {topDept[0]}
-                </span>
-              </div>
-            </div>
-            <div className="chart-card">
-              <div className="chart-label">Gender · age dist</div>
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                  {fPct}
-                  <span style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>%F</span>
-                </div>
-                <svg width="80" height="22" viewBox="0 0 80 22" aria-hidden>
-                  {buckets.map((b, i) => (
-                    <rect
-                      key={i}
-                      x={i * 16 + 1}
-                      y={22 - (b / maxB) * 20}
-                      width="14"
-                      height={(b / maxB) * 20}
-                      rx="1.5"
-                      fill="var(--accent)"
-                      opacity={0.35 + (b / maxB) * 0.55}
-                    />
-                  ))}
-                </svg>
-              </div>
-            </div>
-          </div>
+          <ChartsStrip users={users} filteredUsers={tabFiltered} />
 
-          {/* Table + side panel */}
           <div className="table-wrap">
             <div className="table-scroll">
               {active === "charts" ? (
                 <AnalyticsView users={tabFiltered} />
               ) : tabFiltered.length === 0 ? (
                 <div style={{ padding: "60px 24px", textAlign: "center", color: "var(--fg-tertiary)" }}>
-                  <div style={{ fontSize: 14, fontWeight: 500, color: "var(--fg-secondary)" }}>
-                    No users match these filters
-                  </div>
-                  <div style={{ fontSize: 12.5, marginTop: 4 }}>
-                    Try clearing filters or adjusting search.
-                  </div>
-                  <button
-                    type="button"
-                    className="ds-btn-outline"
-                    onClick={() => {
-                      db.clear();
-                      setActiveSavedId(null);
-                      setTab("all");
-                    }}
-                    style={{ marginTop: 14 }}
-                  >
+                  <div style={{ fontSize: 14, fontWeight: 500, color: "var(--fg-secondary)" }}>No users match these filters</div>
+                  <div style={{ fontSize: 12.5, marginTop: 4 }}>Try clearing filters or adjusting search.</div>
+                  <button type="button" className="ds-btn-outline" onClick={() => { db.clear(); cv.resetActivePreset(); setTab("all"); }} style={{ marginTop: 14 }}>
                     Clear filters
                   </button>
                 </div>
@@ -611,53 +215,25 @@ export default function Dashboard({ users, departments, titles, countries, state
                   onToggleSelect={toggleSelect}
                   onToggleAll={toggleAll}
                   cursorId={cursorId}
-                  onOpen={(u) => {
-                    db.setSelected(u);
-                    setCursorId(u.id);
-                  }}
+                  onOpen={handleSelectUser}
                 />
               )}
             </div>
             {db.selected && (
-              <SidePanel
-                user={db.selected}
-                onClose={() => db.setSelected(null)}
-                onNext={onNext}
-                onPrev={onPrev}
-              />
+              <SidePanel user={db.selected} onClose={() => db.setSelected(null)} onNext={onNext} onPrev={onPrev} />
             )}
           </div>
 
-          {/* Status bar */}
-          <div className="statusbar">
-            <span>
-              <span className="dot" />
-              Synced just now
-            </span>
-            <span>
-              Showing <b style={{ color: "var(--fg-secondary)" }}>{tabFiltered.length}</b> of {users.length}
-            </span>
-            {db.hasFilters && (
-              <span style={{ color: "var(--accent-fg)" }}>
-                {Object.values(db.filters).filter((v) => v).length + (db.ageFilter ? 1 : 0)} filter
-                {Object.values(db.filters).filter((v) => v).length + (db.ageFilter ? 1 : 0) > 1 ? "s" : ""} active
-              </span>
-            )}
-            <span className="spacer" />
-            <span>
-              <kbd>↑↓</kbd> nav
-            </span>
-            <span>
-              <kbd>↵</kbd> open
-            </span>
-            <span>
-              <kbd>esc</kbd> close
-            </span>
-          </div>
+          <Statusbar
+            totalCount={users.length}
+            filteredCount={tabFiltered.length}
+            hasFilters={db.hasFilters}
+            filters={db.filters}
+            ageFilter={db.ageFilter}
+          />
         </div>
       </div>
 
-      {/* Chat assistant — kept as-is on the light app theme */}
       <ChatWidget />
 
       <CommandPalette

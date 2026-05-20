@@ -4,6 +4,7 @@ import Image from "next/image";
 import type { User } from "../../types";
 import { initials, paletteFor } from "../../lib/palette";
 import { I } from "../icons";
+import { cn } from "../../lib/utils";
 
 export type TableSortKey = "name" | "role" | "department" | "title" | "age" | "city";
 
@@ -128,7 +129,7 @@ export function UserTable({
           return (
             <tr
               key={u.id}
-              className={[isSel ? "selected" : "", isCursor ? "cursor" : ""].filter(Boolean).join(" ")}
+              className={cn(isSel && "selected", isCursor && "cursor")}
               onClick={() => onOpen(u)}
             >
               <td
@@ -165,7 +166,7 @@ export function UserTable({
                 </div>
               </td>
               <td>
-                <span className={"role-badge " + u.role}>
+                <span className={cn("role-badge", u.role)}>
                   <span className="role-dot" />
                   {u.role}
                 </span>
