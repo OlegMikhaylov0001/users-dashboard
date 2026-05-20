@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import type { User } from "../../types";
 import { initials, paletteFor } from "../../lib/palette";
@@ -225,9 +226,9 @@ export function SidePanel({ user, onClose, onNext, onPrev }: SidePanelProps) {
         <button type="button" className="ds-btn-outline" style={{ flex: 1, justifyContent: "center" }}>
           <I.Edit size={11} /> Edit
         </button>
-        <button type="button" className="ds-btn-primary">
+        <Link href={`/users/${user.id}`} className="ds-btn-primary">
           <I.ArrowUpRight size={11} /> Open
-        </button>
+        </Link>
       </div>
     </aside>
   );
