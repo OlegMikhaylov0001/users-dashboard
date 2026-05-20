@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import type { User } from "../../types";
 import { initials, paletteFor } from "../../lib/palette";
 import { I } from "../icons";
+import { cn } from "../../lib/utils";
 
 interface SidePanelProps {
   user: User;
@@ -16,55 +17,44 @@ interface SidePanelProps {
 
 type Tab = "overview" | "activity" | "permissions";
 
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="sp-row">
-      <span className="sp-row-key">{label}</span>
-      <span className="sp-row-val">{children}</span>
-    </div>
-  );
-}
+const Row = ({ label, children }: { label: string; children: React.ReactNode }) => (
+  <div className="sp-row">
+    <span className="sp-row-key">{label}</span>
+    <span className="sp-row-val">{children}</span>
+  </div>
+);
 
-function SectionHeader({ children }: { children: React.ReactNode }) {
-  return <div className="sp-section-header">{children}</div>;
-}
+const SectionHeader = ({ children }: { children: React.ReactNode }) => (
+  <div className="sp-section-header">{children}</div>
+);
 
 export function SidePanel({ user, onClose, onNext, onPrev }: SidePanelProps) {
   const [tab, setTab] = useState<Tab>("overview");
   const pal = paletteFor(user.firstName, false);
 
+  // Encapsulated keyboard navigation for detail sliding
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
+    const handleKey = (e: KeyboardEvent) => {
       const inField = e.target instanceof HTMLElement && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA");
       if (inField) return;
       if (e.key === "Escape") onClose();
-      if (onNext && (e.key === "j" || e.key === "ArrowDown")) {
-        e.preventDefault();
-        onNext();
-      }
-      if (onPrev && (e.key === "k" || e.key === "ArrowUp")) {
-        e.preventDefault();
-        onPrev();
-      }
+      if (onNext && ["j", "ArrowDown"].includes(e.key)) { e.preventDefault(); onNext(); }
+      if (onPrev && ["k", "ArrowUp"].includes(e.key)) { e.preventDefault(); onPrev(); }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
   }, [onClose, onNext, onPrev]);
 
   return (
     <aside className="side-panel">
       <div className="sp-header">
         <div className="avatar lg" style={{ background: pal.bg, color: pal.fg, borderColor: pal.bg }}>
-          {user.image ? (
-            <Image src={user.image} alt="" width={56} height={56} unoptimized />
-          ) : (
-            initials(user)
-          )}
+          {user.image ? <Image src={user.image} alt="" width={56} height={56} unoptimized /> : initials(user)}
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span className="sp-id">USR-{user.id}</span>
-            <span className={"role-badge " + user.role}>
+            <span className={cn("role-badge", user.role)}>
               <span className="role-dot" />
               {user.role}
             </span>
@@ -90,9 +80,16 @@ export function SidePanel({ user, onClose, onNext, onPrev }: SidePanelProps) {
       </div>
 
       <div className="sp-tabs">
-        <button type="button" className={"sp-tab" + (tab === "overview" ? " active" : "")} onClick={() => setTab("overview")}>Overview</button>
-        <button type="button" className={"sp-tab" + (tab === "activity" ? " active" : "")} onClick={() => setTab("activity")}>Activity</button>
-        <button type="button" className={"sp-tab" + (tab === "permissions" ? " active" : "")} onClick={() => setTab("permissions")}>Permissions</button>
+        {(["overview", "activity", "permissions"] as Tab[]).map((t) => (
+          <button
+            key={t}
+            type="button"
+            className={cn("sp-tab", tab === t && "active")}
+            onClick={() => setTab(t)}
+          >
+            {t.charAt(0).toUpperCase() + t.slice(1)}
+          </button>
+        ))}
       </div>
 
       <div className="sp-body">
@@ -128,9 +125,7 @@ export function SidePanel({ user, onClose, onNext, onPrev }: SidePanelProps) {
               <Row label="Gender">
                 <span style={{ textTransform: "capitalize" }}>{user.gender}</span>
               </Row>
-              <Row label="Location">
-                {user.address.city}, {user.address.country}
-              </Row>
+              <Row label="Location">{user.address.city}, {user.address.country}</Row>
               <Row label="Blood type">{user.bloodGroup}</Row>
             </div>
 
@@ -168,16 +163,7 @@ export function SidePanel({ user, onClose, onNext, onPrev }: SidePanelProps) {
               { t: "Account created", ago: user.birthDate },
             ].map((a, i) => (
               <div key={i} style={{ display: "flex", gap: 10, padding: "6px 0", fontSize: 12.5 }}>
-                <span
-                  style={{
-                    width: 7,
-                    height: 7,
-                    borderRadius: "50%",
-                    background: "var(--fg-muted)",
-                    marginTop: 6,
-                    flexShrink: 0,
-                  }}
-                />
+                <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--fg-muted)", marginTop: 6, flexShrink: 0 }} />
                 <div>
                   <div style={{ color: "var(--fg-secondary)" }}>{a.t}</div>
                   <div style={{ color: "var(--fg-tertiary)", fontSize: 11.5, marginTop: 1 }}>{a.ago}</div>
@@ -191,18 +177,10 @@ export function SidePanel({ user, onClose, onNext, onPrev }: SidePanelProps) {
           <div className="sp-section">
             <SectionHeader>Access scopes</SectionHeader>
             {["users.read", "users.write", "billing.read", "settings.write", "audit.read"].map((s) => {
-              const granted =
-                user.role === "admin" ||
-                (user.role === "moderator" && !s.endsWith(".write")) ||
-                s === "users.read";
+              const granted = user.role === "admin" || (user.role === "moderator" && !s.endsWith(".write")) || s === "users.read";
               return (
                 <div className="sp-row" key={s}>
-                  <span
-                    className="sp-row-key"
-                    style={{ fontFamily: "var(--font-mono)", fontSize: 11.5 }}
-                  >
-                    {s}
-                  </span>
+                  <span className="sp-row-key" style={{ fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{s}</span>
                   <span className="sp-row-val">
                     {granted ? (
                       <span style={{ color: "var(--green)", display: "inline-flex", alignItems: "center", gap: 4 }}>

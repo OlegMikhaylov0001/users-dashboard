@@ -127,6 +127,8 @@ export const I = {
       <path d="M12 7v5l3 2" />
     </>,
   ),
+  /* Workspace Settings icons */
+  Bolt: makeIcon(<path d="M13 2 3 14h8l-1 8 10-12h-8l1-8Z" />),
   Globe: makeIcon(
     <>
       <circle cx="12" cy="12" r="9" />
