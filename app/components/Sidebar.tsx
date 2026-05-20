@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useContext } from "react";
 import { DashboardCtx } from "./dashboard-ctx";
 import { I } from "./icons";
@@ -155,18 +156,18 @@ export function Sidebar({
 
       <div className="nav-section" style={{ marginTop: 4 }}>
         <div className="nav-header"><span>Workspace</span></div>
-        <button type="button" className="nav-item">
+        <Link href="/settings#depts" className="nav-item">
           <I.Hash size={13} className="nav-item-icon" />
           <span>Departments</span>
-        </button>
-        <button type="button" className="nav-item">
+        </Link>
+        <Link href="/settings#tags" className="nav-item">
           <I.Tag size={13} className="nav-item-icon" />
           <span>Tags</span>
-        </button>
-        <button type="button" className="nav-item">
+        </Link>
+        <Link href="/settings" className="nav-item">
           <I.Settings size={13} className="nav-item-icon" />
           <span>Settings</span>
-        </button>
+        </Link>
       </div>
 
       <div className="sidebar-footer">
